@@ -18,5 +18,5 @@ jobs:
           cache: pip
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -r requirements.txt
-      - run: python -m py_compile app.py movie_pipeline.py theater_pipeline.py test_prompt.py
+      - run: python -m compileall -q app.py process_utils.py story_domain.py theater_pipeline.py adapters test_prompt.py
       - run: python -m unittest -v test_prompt.py
