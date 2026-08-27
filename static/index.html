@@ -3,310 +3,126 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>YouTube - Endless Offline Theater</title>
-
-  <!-- Google & YouTube Standard Typography -->
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&family=Roboto+Mono:wght@500&display=swap" rel="stylesheet">
-
-  <!-- YouTube Theme Stylesheets -->
+  <title>Endless Offline Theater</title>
   <link rel="stylesheet" href="/static/css/index.css">
   <link rel="stylesheet" href="/static/app-exit.css">
-
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='64' height='64' rx='14' fill='%23ff0000'/><polygon points='26,18 46,32 26,46' fill='%23ffffff'/></svg>">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='64' height='64' rx='16' fill='%23f4f1ea'/><polygon points='26,18 47,32 26,46' fill='%23151412'/></svg>">
 </head>
 <body>
-<div class="yt-app">
-  <!-- YouTube Top Navigation Header -->
-  <header class="yt-header">
-    <div class="yt-header-left">
-      <button class="yt-menu-btn" type="button" title="Guide">
-        <svg viewBox="0 0 24 24" width="24" height="24" fill="#fff"><path d="M3 18h18v-2H3v2zm0-5h18v-2H3v2zm0-7v2h18V6H3z"/></svg>
-      </button>
-      <a class="yt-logo" href="/" title="YouTube Endless Theater">
-        <div class="yt-logo-icon">
-          <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
-        </div>
-        <span class="yt-logo-text">Theater<span class="yt-logo-badge">FI</span></span>
+  <div class="app-shell">
+    <header class="app-header">
+      <a class="brand" href="/" title="Endless Offline Theater">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
+        <span>Theater</span>
       </a>
-    </div>
-
-    <!-- Center YouTube Search Bar (Story Prompt Engine) -->
-    <div class="yt-header-center">
-      <form class="yt-search-form" id="ytSearchForm">
-        <input class="yt-search-input" id="ytSearchInput" type="text" placeholder="Search or prompt a living story world..." required>
-        <button class="yt-search-btn" id="btnSearchSubmit" type="submit" title="Generate Story">
-          <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M20.87 19.81l-4.52-4.52A7.95 7.95 0 0 0 18 10a8 8 0 1 0-8 8 7.95 7.95 0 0 0 5.29-1.65l4.52 4.52a.75.75 0 0 0 1.06-1.06zM4 10a6 6 0 1 1 6 6 6.007 6.007 0 0 1-6-6z"/></svg>
+      <div class="mode-switch" id="modeSwitch" aria-label="Experience Mode"></div>
+      <div class="header-actions">
+        <button class="icon-button" id="btnOpenSettings" type="button" title="Settings" aria-label="Settings">
+          <svg viewBox="0 0 24 24"><path d="M12 15.5A3.5 3.5 0 1 0 12 8a3.5 3.5 0 0 0 0 7.5Zm8.7-4.5-2-.6a7 7 0 0 0-.7-1.7l1-1.8-1.9-1.9-1.8 1a7 7 0 0 0-1.7-.7l-.6-2h-2l-.6 2a7 7 0 0 0-1.7.7L6.9 5 5 6.9l1 1.8a7 7 0 0 0-.7 1.7l-2 .6v2l2 .6a7 7 0 0 0 .7 1.7l-1 1.8L6.9 19l1.8-1a7 7 0 0 0 1.7.7l.6 2h2l.6-2a7 7 0 0 0 1.7-.7l1.8 1 1.9-1.9-1-1.8a7 7 0 0 0 .7-1.7l2-.6v-2Z"/></svg>
         </button>
-      </form>
-      <button class="yt-mic-btn" id="btnOpenSettings" type="button" title="Story & Engine Settings">
-        <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5.91-3c-.49 0-.9.36-.98.85C16.52 14.2 14.47 16 12 16s-4.52-1.8-4.93-4.15c-.08-.49-.49-.85-.98-.85-.61 0-1.09.54-1 1.14.49 3 2.89 5.35 5.91 5.78V20c0 .55.45 1 1 1s1-.45 1-1v-2.08c3.02-.43 5.42-2.78 5.91-5.78.1-.6-.39-1.14-1-1.14z"/></svg>
-      </button>
-    </div>
+      </div>
+    </header>
 
-    <!-- Header Right Controls -->
-    <div class="yt-header-right" id="topNav">
-      <button class="yt-icon-btn" id="btnSettingsGear" type="button" title="Settings" onclick="document.getElementById('ytSettingsModal').classList.add('open')">
-        <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>
-      </button>
-    </div>
-  </header>
-
-  <!-- YouTube Main Watch Grid (100vh, zero outer page scroll) -->
-  <main class="yt-main">
-    <!-- Left Column: Video Player & Watch Details -->
-    <div class="yt-player-col">
-      <!-- 16:9 Video Player Viewport -->
-      <div class="yt-player-container" id="ytPlayerContainer">
-        <video id="playerA" playsinline preload="auto"></video>
-        <video id="playerB" playsinline preload="auto"></video>
-
-        <!-- YouTube Closed Captions (CC) Draggable Overlay -->
-        <div class="yt-caption-window" id="ytCaptionWindow" title="Drag to reposition captions">
-          <div class="yt-caption-handle">
-            <div class="yt-caption-pill"></div>
+    <main class="workspace">
+      <section class="stage-column">
+        <div class="player-shell" id="playerShell">
+          <video id="player" playsinline preload="auto"></video>
+          <div class="caption-window" id="captionWindow" aria-live="off">
+            <div class="caption-scroll" id="captionText"></div>
           </div>
-          <div class="yt-caption-tools">
-            <button class="yt-caption-tool-btn" id="btnResetCaptionPos" type="button" title="Reset caption position">Reset</button>
-          </div>
-          <div class="yt-caption-text" id="ytCaptionText">
-            <span>Every completed scene is saved while it plays.</span>
-          </div>
-        </div>
-
-        <!-- Waiting / Continuity Buffer Engine Overlay -->
-        <div class="yt-player-waiting" id="playerWaiting">
-          <div>
-            <div class="yt-waiting-spinner"></div>
+          <div class="waiting" id="playerWaiting">
+            <span class="spinner" aria-hidden="true"></span>
             <strong id="waitTitle">The theater is ready</strong>
-            <p id="waitText">Type a story prompt into the search bar at the top or click below.</p>
-            <button class="yt-btn-subscribe" id="btnFocusSearchFromWaiting" type="button" style="margin:14px auto 0;display:inline-flex;" onclick="document.getElementById('ytSearchInput').focus();">
-              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
-              <span>Type Prompt in Search Bar</span>
+            <p id="waitText">Search or prompt a living story world.</p>
+          </div>
+          <div class="player-controls">
+            <button class="player-button" id="btnPlayPause" type="button" title="Play/Pause" aria-label="Play/Pause">
+              <svg class="play-icon" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+              <svg class="pause-icon" viewBox="0 0 24 24"><path d="M6 19h4V5H6v14Zm8-14v14h4V5h-4Z"/></svg>
+            </button>
+            <button class="player-button" id="btnNextScene" type="button" title="Next Scene" aria-label="Next Scene">
+              <svg viewBox="0 0 24 24"><path d="m6 18 8.5-6L6 6v12Zm10-12v12h2V6h-2Z"/></svg>
+            </button>
+            <button class="player-button" id="btnMute" type="button" title="Mute/Unmute" aria-label="Mute/Unmute">
+              <svg viewBox="0 0 24 24"><path d="M3 9v6h4l5 5V4L7 9H3Zm11-1v8a4.5 4.5 0 0 0 0-8Zm0-4.8v2.1a7 7 0 0 1 0 13.4v2.1a9 9 0 0 0 0-17.6Z"/></svg>
+            </button>
+            <span class="time" id="timeDisplay">0:00 / 0:00</span>
+            <input class="scrubber" id="scrubber" type="range" min="0" max="1000" value="0" aria-label="Scene position">
+            <span class="status" id="statusBadge">IDLE</span>
+            <button class="player-button active" id="btnCc" type="button" title="Subtitles/closed captions (c)" aria-label="Subtitles/closed captions">CC</button>
+            <button class="player-button" id="btnFullscreen" type="button" title="Full screen (f)" aria-label="Full screen">
+              <svg viewBox="0 0 24 24"><path d="M7 14H5v5h5v-2H7v-3Zm-2-4h2V7h3V5H5v5Zm12 7h-3v2h5v-5h-2v3ZM14 5v2h3v3h2V5h-5Z"/></svg>
             </button>
           </div>
         </div>
 
-        <!-- YouTube Bottom Controls Bar Overlay -->
-        <div class="yt-controls-overlay" id="ytControlsOverlay">
-          <!-- Scrubber Progress Bar -->
-          <div class="yt-scrubber-bar" id="scrubberBar">
-            <div class="yt-scrubber-played" id="scrubberPlayed"></div>
-          </div>
-
-          <div class="yt-controls-row">
-            <!-- Left Controls: Play/Pause, Next, Volume, Time, LIVE chip -->
-            <div class="yt-controls-left">
-              <button class="yt-ctrl-btn" id="btnPlayPause" type="button" title="Play/Pause">
-                <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
-              </button>
-              <button class="yt-ctrl-btn" id="btnNextScene" type="button" title="Next Scene">
-                <svg viewBox="0 0 24 24"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg>
-              </button>
-              <button class="yt-ctrl-btn" id="btnMute" type="button" title="Mute/Unmute">
-                <svg viewBox="0 0 24 24"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg>
-              </button>
-              <div class="yt-time-display">
-                <span class="yt-live-chip">
-                  <span class="yt-live-dot"></span>
-                  <span id="liveStatusBadge">IDLE</span>
-                </span>
-                <span id="currentTimeDisplay">0:00 / 0:00</span>
-              </div>
-            </div>
-
-            <!-- Right Controls: CC, Settings, Fullscreen -->
-            <div class="yt-controls-right">
-              <button class="yt-ctrl-btn cc-active" id="btnCc" type="button" title="Subtitles/closed captions (c)">
-                <svg viewBox="0 0 24 24"><path d="M19 4H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2zm-8 7H9.5v-.5h-2v3h2V13H11v1a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1v-4a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1v1zm7 0h-1.5v-.5h-2v3h2V13H18v1a1 1 0 0 1-1 1h-3a1 1 0 0 1-1-1v-4a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1v1z"/></svg>
-              </button>
-              <button class="yt-ctrl-btn" type="button" title="Settings" onclick="document.getElementById('ytSettingsModal').classList.add('open')">
-                <svg viewBox="0 0 24 24"><path d="M12 15.6a3.6 3.6 0 1 0 0-7.2 3.6 3.6 0 0 0 0 7.2zM19.14 12.94c.04-.3.06-.61.06-.94s-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58z"/></svg>
-              </button>
-              <button class="yt-ctrl-btn" id="btnFullscreen" type="button" title="Full screen (f)">
-                <svg viewBox="0 0 24 24"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg>
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Video Primary Title -->
-      <h1 class="yt-primary-title" id="primaryVideoTitle">Endless Offline Theater</h1>
-
-      <!-- Channel Row & Action Buttons -->
-      <div class="yt-channel-row">
-        <div class="yt-channel-left">
-          <div class="yt-channel-avatar">∞</div>
-          <div class="yt-channel-info">
-            <div class="yt-channel-name">Endless Story Engine</div>
-            <div class="yt-channel-subs">Wan 2.2 · RTX 5070 · Gemma 4 E4B · 100% Local</div>
-          </div>
-          <button class="yt-btn-subscribe" id="btnStartStoryPrompt" type="button" onclick="document.getElementById('ytSearchInput').focus();">
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
-            <span>Prompt Story</span>
+        <form class="composer" id="storyForm">
+          <textarea id="promptInput" rows="1" maxlength="1200" placeholder="Search or prompt a living story world..." required></textarea>
+          <textarea id="storyTextInput" class="book-input" rows="8" placeholder="My story" hidden></textarea>
+          <button class="start-button" id="btnStart" type="submit" title="Prompt Story" aria-label="Prompt Story">
+            <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
           </button>
-          <button class="yt-pill-btn" id="btnOpenDirectTab" type="button" onclick="document.getElementById('tabChat').click()">
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/></svg>
-            <span>Direct Story</span>
-          </button>
-        </div>
+        </form>
 
-        <div class="yt-action-pills">
-          <button class="yt-pill-btn danger" id="btnStopStream" type="button" disabled title="Stop and keep archive">
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M6 6h12v12H6z"/></svg>
+        <div class="now-playing">
+          <div>
+            <span id="sceneNumber">No active scene</span>
+            <h1 id="sceneTitle">Endless Offline Theater</h1>
+          </div>
+          <button class="quiet-button danger" id="btnStop" type="button" disabled title="Stop and keep archive">
+            <svg viewBox="0 0 24 24"><path d="M6 6h12v12H6z"/></svg>
             <span>Stop Stream</span>
           </button>
-          <button class="yt-pill-btn" type="button" onclick="document.getElementById('ytSettingsModal').classList.add('open')">
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M19.14 12.94c.04-.3.06-.61.06-.94s-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6a3.6 3.6 0 1 0 0-7.2 3.6 3.6 0 0 0 0 7.2z"/></svg>
-            <span>Settings</span>
-          </button>
         </div>
-      </div>
+      </section>
 
-      <!-- YouTube Description Card -->
-      <div class="yt-desc-card" onclick="document.getElementById('ytSearchInput').focus();" title="Click to prompt in search bar">
-        <div class="yt-desc-header">
-          <strong id="descViews">0 scenes</strong>
-          <span id="descDate">Cinema 480×272 · 16 FPS</span>
-          <span id="sceneNoBadge">No active scene</span>
+      <aside class="side-panel">
+        <div class="side-tabs">
+          <button class="active" data-tab="scenes" type="button">All Scenes</button>
+          <button data-tab="direct" type="button">Live Chat / Direct</button>
+          <button data-tab="saved" type="button">Saved Streams</button>
         </div>
-        <div id="descPromptText" style="color:#d1d5db;margin-bottom:6px;">Click here or search bar above to type a story prompt.</div>
-        <div class="yt-desc-fact" id="descFactBox" hidden></div>
-      </div>
-    </div>
-
-    <!-- Right Column: YouTube Up Next Sidebar / Live Chat -->
-    <div class="yt-sidebar-col">
-      <div class="yt-sidebar-header">
-        <div class="yt-sidebar-tabs">
-          <button class="yt-chip active" id="tabScenes" type="button">All Scenes</button>
-          <button class="yt-chip" id="tabChat" type="button">Live Chat / Direct</button>
-          <button class="yt-chip" id="tabSaved" type="button">Saved Streams</button>
-        </div>
-      </div>
-
-      <!-- Scrollable Sidebar Body -->
-      <div class="yt-sidebar-body" id="sidebarBody">
-        <div style="color:var(--yt-text-secondary);padding:16px;text-align:center;">
-          Start stream to see upcoming scene cards.
-        </div>
-      </div>
-    </div>
-  </main>
-</div>
-
-<!-- YouTube Settings Flyout Modal -->
-<div class="yt-modal-backdrop" id="ytSettingsModal">
-  <div class="yt-modal-content">
-    <div class="yt-modal-header">
-      <h3>Stream & Story Settings</h3>
-      <button class="yt-modal-close" id="btnCloseSettings" type="button">✕</button>
-    </div>
-
-    <div class="yt-form-group">
-      <label for="modeSelect">Experience Mode</label>
-      <select id="modeSelect">
-        <option value="edutainment" selected>Educational Adventure</option>
-        <option value="dream">Endless Dream</option>
-        <option value="interactive">Interactive Character Show</option>
-        <option value="story">Pure Story</option>
-        <option value="lesson">Story-led Lesson</option>
-      </select>
-    </div>
-
-    <div class="yt-form-group">
-      <label for="audienceSelect">Audience Level</label>
-      <select id="audienceSelect">
-        <option value="young">Young Learners</option>
-        <option value="family" selected>Family / Classroom</option>
-        <option value="teen">Teen</option>
-        <option value="adult">Adult</option>
-      </select>
-    </div>
-
-    <div class="yt-form-group" id="learningGroup">
-      <label for="learningInput">Learning Focus (Optional)</label>
-      <input id="learningInput" type="text" placeholder="e.g. astronomy, ecology, history">
-    </div>
-
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
-      <div class="yt-form-group">
-        <label for="languageSelect">Narration Language</label>
-        <select id="languageSelect">
-          <option value="en" selected>English</option>
-          <option value="fi">Finnish · suomi</option>
-          <option value="sv">Swedish · svenska</option>
-          <option value="de">German · Deutsch</option>
-          <option value="fr">French · français</option>
-          <option value="es">Spanish · español</option>
-          <option value="it">Italian · italiano</option>
-          <option value="pt">Portuguese · português</option>
-          <option value="ja">Japanese · 日本語</option>
-        </select>
-      </div>
-      <div class="yt-form-group">
-        <label for="voiceSelect">Neural Voice</label>
-        <select id="voiceSelect">
-          <option value="M1" selected>M1 (Male)</option>
-          <option value="M2">M2 (Male)</option>
-          <option value="M3">M3 (Male)</option>
-          <option value="F1">F1 (Female)</option>
-          <option value="F2">F2 (Female)</option>
-          <option value="F3">F3 (Female)</option>
-        </select>
-      </div>
-    </div>
-
-    <div style="display:flex;align-items:center;gap:10px;">
-      <button class="yt-pill-btn" id="btnPreviewVoice" type="button" style="height:32px;font-size:12px;">Hear Voice</button>
-      <audio id="voiceSampleAudio" controls hidden style="height:32px;max-width:180px;"></audio>
-    </div>
-
-    <div class="yt-form-group">
-      <label for="transLanguageSelect">Language-Learning Translation</label>
-      <select id="transLanguageSelect">
-        <option value="">Off · Speak story language only</option>
-      </select>
-    </div>
-
-    <details style="border:1px solid var(--yt-border);border-radius:6px;padding:10px;background:rgba(0,0,0,0.2);">
-      <summary style="cursor:pointer;font-size:12px;font-weight:600;color:var(--yt-text-secondary);">Advanced Quality (Cinema Default: 480×272 · 16 FPS)</summary>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px;">
-        <div class="yt-form-group"><label>Width</label><input id="qualityWidth" type="number" min="192" max="832" step="16" value="480"></div>
-        <div class="yt-form-group"><label>Height</label><input id="qualityHeight" type="number" min="192" max="832" step="16" value="272"></div>
-        <div class="yt-form-group"><label>Frames</label><input id="qualityFrames" type="number" min="9" max="81" step="4" value="81"></div>
-        <div class="yt-form-group"><label>FPS</label><input id="qualityFps" type="number" min="1" max="60" step="1" value="16"></div>
-        <div class="yt-form-group"><label>Min Words</label><input id="minWords" type="number" min="30" max="1200" step="10" value="80"></div>
-        <div class="yt-form-group"><label>Max Words</label><input id="maxWords" type="number" min="30" max="2400" step="10" value="110"></div>
-        <div class="yt-form-group"><label>Max Slow</label><input id="maxSlow" type="number" min="1" max="20" step="0.5" value="8"></div>
-        <div class="yt-form-group"><label>Compaction Interval</label><input id="compactionScenes" type="number" min="0" max="200" step="5" value="30"></div>
-        <div class="yt-form-group" style="grid-column:1/-1;"><label>World Seed (-1 random)</label><input id="seedInput" type="number" min="-1" value="-1"></div>
-      </div>
-    </details>
-
-    <details style="border:1px solid var(--yt-border);border-radius:6px;padding:10px;background:rgba(0,0,0,0.2);">
-      <summary style="cursor:pointer;font-size:12px;font-weight:600;color:var(--yt-text-secondary);">💻 System Requirements</summary>
-      <div style="font-size:11.5px;color:var(--yt-text-secondary);line-height:1.45;margin-top:8px;display:flex;flex-direction:column;gap:6px;">
-        <div><b>GPU VRAM:</b> 12 GB Minimum (RTX 3060/4070/5070) · 16–24 GB Recommended</div>
-        <div><b>System RAM:</b> 32 GB Minimum (Gemma + Python + ComfyUI cache ~28–35 GB) · 64 GB Recommended</div>
-        <div><b>CPU:</b> 8-Core Minimum (Ryzen 7 / i7) · 16-Core Recommended (Ryzen 9 7950X / i9)</div>
-        <div><b>Storage:</b> 100 GB+ free on NVMe SSD</div>
-      </div>
-    </details>
-
-    <button class="yt-btn-subscribe" type="button" style="width:100%;justify-content:center;margin-top:8px;" onclick="document.getElementById('ytSettingsModal').classList.remove('open')">
-      Done
-    </button>
+        <div class="side-body" id="sideBody"></div>
+      </aside>
+    </main>
   </div>
-</div>
 
-<div class="toast" id="toast"></div>
+  <div class="modal" id="settingsModal" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+    <div class="settings-card">
+      <div class="settings-header">
+        <h2 id="settingsTitle">Stream & Story Settings</h2>
+        <button class="icon-button" id="btnCloseSettings" type="button" aria-label="Close">×</button>
+      </div>
+      <div class="settings-grid">
+        <label>Audience Level<select id="audienceSelect"></select></label>
+        <label>Narration Language<select id="languageSelect"></select></label>
+        <label>Neural Voice<select id="voiceSelect"></select></label>
+        <label>Language-Learning Translation<select id="translationSelect"><option value="">Off · Speak story language only</option></select></label>
+      </div>
+      <div class="voice-preview">
+        <button class="quiet-button" id="btnPreviewVoice" type="button">Hear Voice</button>
+        <audio id="voicePreview" controls hidden></audio>
+      </div>
+      <details>
+        <summary>Advanced Quality (Cinema Default: 480×272 · 16 FPS)</summary>
+        <div class="quality-grid">
+          <label>Width<input id="qualityWidth" type="number" min="192" max="832" step="16" value="480"></label>
+          <label>Height<input id="qualityHeight" type="number" min="192" max="832" step="16" value="272"></label>
+          <label>Frames<input id="qualityFrames" type="number" min="9" max="81" step="4" value="81"></label>
+          <label>FPS<input id="qualityFps" type="number" min="1" max="60" value="16"></label>
+          <label>Min Words<input id="minWords" type="number" min="30" max="1200" step="10" value="80"></label>
+          <label>Max Words<input id="maxWords" type="number" min="30" max="2400" step="10" value="110"></label>
+          <label>Max Slow<input id="maxSlow" type="number" min="1" max="20" step="0.5" value="8"></label>
+          <label>Compaction Interval<input id="compactionScenes" type="number" min="0" max="200" step="5" value="30"></label>
+          <label class="wide">World Seed (-1 random)<input id="seedInput" type="number" min="-1" value="-1"></label>
+        </div>
+      </details>
+    </div>
+  </div>
 
-<!-- App Scripts -->
-<script src="/static/app-exit.js" defer></script>
-<script src="/static/js/subtitles.js"></script>
-<script src="/static/js/theater.js"></script>
+  <div class="toast" id="toast" role="status"></div>
+  <script src="/static/app-exit.js" defer></script>
+  <script src="/static/js/highlight.js"></script>
+  <script src="/static/js/theater.js"></script>
 </body>
 </html>
