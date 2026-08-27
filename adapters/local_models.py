@@ -12,7 +12,7 @@ from typing import Any
 
 from aiohttp import ClientSession, ClientTimeout
 
-from process_utils import terminate_process_tree
+from process_utils import hidden_process_kwargs, terminate_process_tree
 from story_domain import LANGUAGES, TRANSLATION_LANGUAGES, VOICES, TheaterError
 
 
@@ -123,7 +123,6 @@ class StoryRuntime:
                 "LLAMA_ARG_CHAT_TEMPLATE_KWARGS": '{"enable_thinking":false}',
             })
             suffix = "-gpu" if profile == "gpu" else ""
-            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
             with (log_dir / f"writer{suffix}.out.log").open("ab") as stdout, (
                 log_dir / f"writer{suffix}.err.log"
             ).open("ab") as stderr:
@@ -133,7 +132,7 @@ class StoryRuntime:
                     env=env,
                     stdout=stdout,
                     stderr=stderr,
-                    creationflags=creationflags,
+                    **hidden_process_kwargs(),
                 )
             self.processes[profile] = process
             self.activate(profile)
@@ -234,7 +233,6 @@ class SupertonicRuntime:
                 str(server), "serve", "--host", "127.0.0.1", "--port", "8084",
                 "--model", "supertonic-3", "--log-level", "warning",
             ]
-            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
             with (log_dir / "supertonic.out.log").open("ab") as stdout, (
                 log_dir / "supertonic.err.log"
             ).open("ab") as stderr:
@@ -244,7 +242,7 @@ class SupertonicRuntime:
                     env=env,
                     stdout=stdout,
                     stderr=stderr,
-                    creationflags=creationflags,
+                    **hidden_process_kwargs(),
                 )
             self.pid_file.write_text(str(self.process.pid), encoding="utf-8")
             for _ in range(180):
@@ -318,9 +316,6 @@ class SupertonicRuntime:
         translation_language: str,
         speed: float = 1.05,
     ) -> float:
-        if not translation_language:
-            text = " ".join(str(pair.get("original", "")).strip() for pair in pairs).strip()
-            return await self.synthesize(text, output, voice=voice, language=original_language, speed=speed)
         started = time.perf_counter()
         part_dir = output.parent / f".{output.stem}_parts"
         await asyncio.to_thread(shutil.rmtree, part_dir, True)

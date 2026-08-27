@@ -6,7 +6,7 @@ The runtime optimizes for sustained local playback and recoverability, not a sin
 
 | Work | Primary resource | Boundary |
 | --- | --- | --- |
-| Story planning and optional translation | CPU/RAM, optional bounded GPU burst | `StoryRuntime` adapter |
+| Story planning and translation | CPU/RAM, optional bounded GPU burst | `StoryRuntime` adapter |
 | Speech synthesis | CPU/RAM | `SupertonicRuntime` adapter |
 | Video generation | GPU/VRAM | `ComfyAdapter` |
 | Word alignment | GPU/VRAM for a short post-render pass | `WhisperAlignmentAdapter` |

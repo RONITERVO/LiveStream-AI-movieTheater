@@ -57,8 +57,21 @@
         </div>
 
         <form class="composer" id="storyForm">
-          <textarea id="promptInput" rows="1" maxlength="1200" placeholder="Search or prompt a living story world..." required></textarea>
+          <textarea id="promptInput" rows="1" maxlength="1200" placeholder="Story…" required></textarea>
           <textarea id="storyTextInput" class="book-input" rows="8" placeholder="My story" hidden></textarea>
+          <div class="language-pair" aria-label="Narration and translation languages">
+            <label class="flag-picker" id="quickLanguagePicker" title="Narration language">
+              <svg class="flag-icon" id="quickLanguageFlag" viewBox="0 0 60 40" aria-hidden="true"><use href="/static/flags.svg#flag-en"></use></svg>
+              <select class="flag-select" id="quickLanguageSelect" aria-label="Narration language"></select>
+            </label>
+            <button class="swap-languages" id="btnSwapLanguages" type="button" aria-label="Swap languages" title="Swap languages">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 3-3H4v6l3-3Zm10 10-3 3h6v-6l-3 3ZM6.4 14.5A7 7 0 0 0 18.7 8h-2.2A5 5 0 0 1 8 13l-1.6 1.5Zm11.2-5A7 7 0 0 0 5.3 16h2.2A5 5 0 0 1 16 11l1.6-1.5Z"/></svg>
+            </button>
+            <label class="flag-picker" id="quickTranslationPicker" title="Translation language">
+              <svg class="flag-icon" id="quickTranslationFlag" viewBox="0 0 60 40" aria-hidden="true"><use href="/static/flags.svg#flag-fi"></use></svg>
+              <select class="flag-select" id="quickTranslationSelect" aria-label="Translation language"></select>
+            </label>
+          </div>
           <button class="start-button" id="btnStart" type="submit" title="Prompt Story" aria-label="Prompt Story">
             <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
           </button>
@@ -97,7 +110,7 @@
         <label>Audience Level<select id="audienceSelect"></select></label>
         <label>Narration Language<select id="languageSelect"></select></label>
         <label>Neural Voice<select id="voiceSelect"></select></label>
-        <label>Language-Learning Translation<select id="translationSelect"><option value="">Off · Speak story language only</option></select></label>
+        <label>Language-Learning Translation<select id="translationSelect"></select></label>
       </div>
       <div class="voice-preview">
         <button class="quiet-button" id="btnPreviewVoice" type="button">Hear Voice</button>

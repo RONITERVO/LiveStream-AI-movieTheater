@@ -11,6 +11,7 @@ from aiohttp import web
 from adapters.comfy import ComfyAdapter, build_wan_prompt
 from story_domain import (
     CINEMA_DEFAULTS,
+    DEFAULT_TRANSLATION_LANGUAGE,
     LANGUAGE_NAMES,
     TRANSLATION_LANGUAGES,
     VOICES,
@@ -111,9 +112,15 @@ async def api_config(_: web.Request) -> web.Response:
             for value in ("young", "family", "teen", "adult")
         ],
         "languages": [
-            {"value": value, "label": label, "translation": value in TRANSLATION_LANGUAGES}
+            {
+                "value": value,
+                "label": label,
+                "flag": f"flag-{value}",
+                "translation": value in TRANSLATION_LANGUAGES,
+            }
             for value, label in LANGUAGE_NAMES.items()
         ],
+        "default_translation_language": DEFAULT_TRANSLATION_LANGUAGE,
         "voices": sorted(VOICES, key=lambda value: (value[0], int(value[1:]))),
         "quality": CINEMA_DEFAULTS,
     })

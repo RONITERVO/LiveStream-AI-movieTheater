@@ -16,6 +16,8 @@
   let directiveBusy = false;
   let muted = false;
   let captions = true;
+  let languageChoices = [];
+  let defaultTranslationLanguage = 'fi';
   const highlighter = new window.CaptionHighlighter($('captionText'), (seconds) => {
     player.currentTime = Math.max(0, Math.min(Number(seconds) || 0, player.duration || Number(seconds) || 0));
   });
@@ -59,9 +61,38 @@
     select.append(option);
   }
 
+  function availableTranslation(source, preferred) {
+    if (preferred && preferred !== source) return preferred;
+    if (defaultTranslationLanguage !== source) return defaultTranslationLanguage;
+    if (source !== 'en') return 'en';
+    return languageChoices.find((item) => item.translation && item.value !== source)?.value || 'en';
+  }
+
+  function showFlag(flagId, pickerId, language, prefix) {
+    const choice = languageChoices.find((item) => item.value === language);
+    $(flagId).querySelector('use').setAttribute('href', `/static/flags.svg#${choice?.flag || `flag-${language}`}`);
+    $(pickerId).title = `${prefix}: ${choice?.label || language.toUpperCase()}`;
+  }
+
+  function syncLanguageControls() {
+    const source = $('languageSelect').value || 'en';
+    const target = availableTranslation(source, $('translationSelect').value);
+    $('languageSelect').value = source;
+    $('quickLanguageSelect').value = source;
+    $('translationSelect').value = target;
+    $('quickTranslationSelect').value = target;
+    showFlag('quickLanguageFlag', 'quickLanguagePicker', source, 'Narration language');
+    showFlag('quickTranslationFlag', 'quickTranslationPicker', target, 'Translation language');
+    [$('translationSelect'), $('quickTranslationSelect')].forEach((select) => {
+      [...select.options].forEach((option) => { option.disabled = option.value === source; });
+    });
+  }
+
   async function loadOptions() {
     const response = await fetch('/api/config');
     const options = await response.json();
+    languageChoices = options.languages || [];
+    defaultTranslationLanguage = options.default_translation_language || 'fi';
     options.modes.forEach((mode) => {
       const button = document.createElement('button');
       button.type = 'button';
@@ -71,9 +102,15 @@
       $('modeSwitch').append(button);
     });
     options.audiences.forEach((item) => appendOption($('audienceSelect'), item.value, item.label, item.value === 'family'));
-    options.languages.forEach((item) => {
+    languageChoices.forEach((item) => {
+      const quickLabel = `${item.value.toUpperCase()} · ${item.label}`;
       appendOption($('languageSelect'), item.value, item.label, item.value === 'en');
-      if (item.translation) appendOption($('translationSelect'), item.value, item.label, false);
+      appendOption($('quickLanguageSelect'), item.value, quickLabel, item.value === 'en');
+      if (item.translation) {
+        const selected = item.value === defaultTranslationLanguage;
+        appendOption($('translationSelect'), item.value, item.label, selected);
+        appendOption($('quickTranslationSelect'), item.value, quickLabel, selected);
+      }
     });
     options.voices.forEach((voice) => {
       const label = `${voice} (${voice.startsWith('F') ? 'Female' : 'Male'})`;
@@ -86,6 +123,7 @@
       };
       if (fields[key]) $(fields[key]).value = value;
     });
+    syncLanguageControls();
     setMode('story');
   }
 
@@ -477,6 +515,22 @@
     });
     $('btnStop').addEventListener('click', stopStory);
     $('btnPreviewVoice').addEventListener('click', previewVoice);
+    $('languageSelect').addEventListener('change', syncLanguageControls);
+    $('translationSelect').addEventListener('change', syncLanguageControls);
+    $('quickLanguageSelect').addEventListener('change', () => {
+      $('languageSelect').value = $('quickLanguageSelect').value;
+      syncLanguageControls();
+    });
+    $('quickTranslationSelect').addEventListener('change', () => {
+      $('translationSelect').value = $('quickTranslationSelect').value;
+      syncLanguageControls();
+    });
+    $('btnSwapLanguages').addEventListener('click', () => {
+      const source = $('languageSelect').value;
+      $('languageSelect').value = $('translationSelect').value;
+      $('translationSelect').value = source;
+      syncLanguageControls();
+    });
     $('btnPlayPause').addEventListener('click', () => { if (player.paused) player.play().catch(() => {}); else player.pause(); });
     $('btnNextScene').addEventListener('click', () => playScene(currentIndex + 1));
     $('btnMute').addEventListener('click', () => { muted = !muted; player.muted = muted; $('btnMute').classList.toggle('active', muted); });

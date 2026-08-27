@@ -11,7 +11,7 @@ This repository contains application code only. Model weights, generated media, 
 - **My Story** narrates pasted text exactly. The source is written once to a per-session file and read through a byte cursor, so book-sized input is not copied through every request or polling response.
 - **Audience levels** remain available for young, family, teen, and adult experiences.
 - **Narration** retains all 31 installed Supertonic languages and all ten voices.
-- **Language-learning translation** speaks and displays each source sentence followed by its paired translation in any supported translation language.
+- **Language-learning translation** is always active: each source sentence is spoken and displayed before its paired translation. Compact flag controls beside Start change either language without opening settings.
 - **Advanced Quality** retains resolution, source frames, playback FPS, word limits, maximum slow motion, context compaction, and deterministic or random seeds.
 - **Exact word highlighting** uses Whisper timestamps aligned back to the displayed source and translation words. Clicking a word seeks the scene audio.
 - **Durable output** uses ordinary JSON, MP4, WAV, SRT, M3U8, and UTF-8 text files.
@@ -70,7 +70,7 @@ python -m pip install -r requirements.txt
 python app.py
 ```
 
-On the tested layout, `Start Wan Video UI.cmd` uses ComfyUI's virtual-environment Python. `Launch Wan Video UI.vbs` starts it hidden, waits for readiness, and opens the local app. Launchers inherit `WAN_*` environment variables; `.env.example` is documentation and is not loaded automatically.
+On the tested layout, `Start Wan Video UI.cmd` uses ComfyUI's virtual-environment Python. `Launch Wan Video UI.vbs` starts it hidden, waits for readiness, and opens the local app. App-owned ComfyUI, Gemma, Supertonic, FFmpeg, FFprobe, and cleanup processes use one Windows adapter contract that suppresses console allocation and window flashes. Launchers inherit `WAN_*` environment variables; `.env.example` is documentation and is not loaded automatically.
 
 ## Configuration
 

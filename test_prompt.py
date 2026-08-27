@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -12,6 +13,7 @@ from adapters.local_models import StoryRuntime, SupertonicRuntime
 from adapters.story_source import StorySourceAdapter, StorySourceFinished
 from adapters.whisper import WhisperAlignmentAdapter
 from app import _is_local_exit_request, api_config, create_app
+from process_utils import hidden_process_kwargs
 from story_domain import (
     AUDIENCES,
     LANGUAGE_NAMES,
@@ -21,6 +23,7 @@ from story_domain import (
     spoken_text,
     spoken_word_count,
     split_narration_sentences,
+    translation_language,
     validate_story_request,
 )
 from theater_pipeline import TheaterError, TheaterManager
@@ -55,6 +58,17 @@ class ProductSurfaceTests(unittest.TestCase):
     def test_learning_focus_is_not_part_of_the_contract(self):
         config = validate_story_request({"prompt": "A quiet story", "learning_focus": "astronomy"})
         self.assertNotIn("learning_focus", config)
+
+    def test_every_story_has_a_distinct_translation_language(self):
+        english = validate_story_request({"prompt": "A quiet story", "language": "en"})
+        finnish = validate_story_request({"prompt": "Hiljainen tarina", "language": "fi"})
+        self.assertEqual(english["translation_language"], "fi")
+        self.assertEqual(finnish["translation_language"], "en")
+        self.assertEqual(translation_language({"language": "en"}), "fi")
+        with self.assertRaises(ValueError):
+            validate_story_request({
+                "prompt": "A quiet story", "language": "en", "translation_language": "en",
+            })
 
     def test_advanced_quality_values_are_preserved_and_bounded(self):
         settings = {
@@ -93,9 +107,12 @@ class ProductSurfaceTests(unittest.TestCase):
     def test_browser_options_are_owned_by_the_backend(self):
         response = asyncio.run(api_config(None))
         data = json.loads(response.text)
+        flags = (Path(__file__).parent / "static" / "flags.svg").read_text(encoding="utf-8")
         self.assertEqual([item["value"] for item in data["modes"]], ["story", "interactive", "my_story"])
         self.assertEqual(len(data["voices"]), 10)
         self.assertEqual(len(data["languages"]), len(LANGUAGE_NAMES))
+        self.assertEqual(data["default_translation_language"], "fi")
+        self.assertTrue(all(f'id="{item["flag"]}"' in flags for item in data["languages"]))
 
 
 class StorySourceTests(unittest.TestCase):
@@ -240,6 +257,15 @@ class StorySourceTests(unittest.TestCase):
 
 
 class AdapterAndOrchestrationTests(unittest.TestCase):
+    def test_windows_child_processes_are_fully_hidden(self):
+        kwargs = hidden_process_kwargs()
+        if os.name == "nt":
+            self.assertTrue(kwargs["creationflags"] & subprocess.CREATE_NO_WINDOW)
+            self.assertTrue(kwargs["startupinfo"].dwFlags & subprocess.STARTF_USESHOWWINDOW)
+            self.assertEqual(kwargs["startupinfo"].wShowWindow, subprocess.SW_HIDE)
+        else:
+            self.assertEqual(kwargs, {})
+
     def test_wan_graph_keeps_the_validated_advanced_inputs(self):
         graph = build_wan_prompt({
             "prompt": "cinematic rain", "negative": "text", "width": 480, "height": 272,
@@ -415,6 +441,9 @@ class AppBoundaryTests(unittest.TestCase):
             self.assertNotIn(removed, combined)
         self.assertIn("my story", combined)
         self.assertIn("advanced quality", combined)
+        self.assertNotIn("speak story language only", combined)
+        self.assertIn("quickLanguageSelect", html)
+        self.assertIn("quickTranslationSelect", html)
         self.assertIn("response.status === 404", javascript)
         self.assertIn("localStorage.removeItem('wanTheaterSession')", javascript)
 
