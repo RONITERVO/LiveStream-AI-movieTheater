@@ -22,6 +22,7 @@ from story_domain import (
     LANGUAGE_NAMES,
     TheaterError,
     narration_word_limits,
+    narration_safety_limits,
     quality_settings,
     spoken_text,
     spoken_word_count,
@@ -637,6 +638,7 @@ class TheaterManager:
         config = state["config"]
         language_name = self.LANGUAGE_NAMES.get(config.get("language", "en"), config.get("language", "en"))
         minimum_words, maximum_words = self.narration_word_limits(config)
+        safety_minimum, safety_maximum = narration_safety_limits(config)
         opening_maximum = min(maximum_words, minimum_words + 80)
         opening_sentences = max(3, min(10, math.ceil(minimum_words / 7)))
         opening_sentence_minimum = max(4, math.ceil(minimum_words / opening_sentences))
@@ -662,6 +664,8 @@ class TheaterManager:
                 language=str(config.get("language", "en")),
                 minimum=minimum_words,
                 maximum=opening_maximum,
+                playback_minimum=safety_minimum,
+                playback_maximum=safety_maximum,
             )
             request = (
                 "Analyze the exact opening passage from My story. Infer a compact visual bible and one filmable scene "
@@ -960,6 +964,7 @@ class TheaterManager:
         my_story = state.get("config", {}).get("mode") == "my_story"
         words = self._target_words(state)
         request_minimum, request_maximum = self._narration_request_limits(state)
+        safety_minimum, safety_maximum = narration_safety_limits(state["config"])
         sentence_count = max(3, min(10, math.ceil(words / 7)))
         sentence_minimum = max(4, math.ceil(request_minimum / sentence_count))
         sentence_maximum = max(sentence_minimum, math.floor(request_maximum / sentence_count))
@@ -989,6 +994,8 @@ class TheaterManager:
                 language=str(language),
                 minimum=request_minimum,
                 maximum=request_maximum,
+                playback_minimum=safety_minimum,
+                playback_maximum=safety_maximum,
             )
             request = (
                 f"{shared_context}"
@@ -1043,11 +1050,16 @@ class TheaterManager:
         if len(narration_sentences) > 48:
             raise TheaterError(f"The local writer returned too many narration sentences ({len(narration_sentences)}) for scene {number}.")
         configured_minimum, configured_maximum = self.narration_word_limits(state["config"])
-        safety_minimum = max(8, math.floor(configured_minimum * 0.70))
-        safety_maximum = math.ceil(configured_maximum * 1.30)
-        if narration_words < safety_minimum or narration_words > safety_maximum:
+        safety_minimum, safety_maximum = narration_safety_limits(state["config"])
+        final_source_chunk = bool(
+            source_chunk and source_cursor >= int(state.get("story_source", {}).get("bytes") or 0)
+        )
+        source_duration_invalid = narration_words < safety_minimum and not final_source_chunk
+        writer_duration_invalid = not source_chunk and not safety_minimum <= narration_words <= safety_maximum
+        if source_duration_invalid or writer_duration_invalid:
+            source_name = "My story source" if source_chunk else "The local writer"
             raise TheaterError(
-                f"the local writer returned {narration_words} narration words; "
+                f"{source_name} returned {narration_words} narration words; "
                 f"the safe duration envelope requires {safety_minimum}-{safety_maximum}"
             )
         fingerprint_text = f"{scene['beat']}|{scene['visual_action']}|{scene['camera']}".lower()
@@ -1062,6 +1074,8 @@ class TheaterManager:
             "requested_source_words_max": request_maximum,
             "accepted_source_words": narration_words,
             "configured_source_budget_met": configured_minimum <= narration_words <= configured_maximum,
+            "safe_duration_envelope_met": safety_minimum <= narration_words <= safety_maximum,
+            "sentence_boundary_duration_override": bool(source_chunk and narration_words > safety_maximum),
         }
         scene["_planning_context_before"] = planning_context_before
         scene["_live_directive_ids"] = live_directive_ids
