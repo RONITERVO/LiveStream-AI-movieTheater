@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import html as html_lib
 import json
 import logging
 import math
@@ -12,21 +11,28 @@ import secrets
 import shutil
 import subprocess
 import time
-import wave
 from pathlib import Path
 from typing import Any, Callable
 
-from aiohttp import ClientSession, ClientTimeout
-
-from process_utils import terminate_process_tree
+from adapters.local_models import StoryRuntime, SupertonicRuntime
+from adapters.story_source import StorySourceAdapter, StorySourceFinished
+from adapters.whisper import WhisperAlignmentAdapter
+from story_domain import (
+    CINEMA_DEFAULTS,
+    DEFAULT_CONTEXT_COMPACTION_SCENES,
+    LANGUAGE_NAMES,
+    TheaterError,
+    narration_word_limits,
+    quality_settings,
+    spoken_text,
+    spoken_word_count,
+    split_narration_sentences,
+    translation_language,
+)
 
 
 LOGGER = logging.getLogger("wan-video-ui.theater")
-THEATER_VERSION = 3
-
-
-class TheaterError(RuntimeError):
-    pass
+THEATER_VERSION = 4
 
 
 class GpuReleaseError(TheaterError):
@@ -55,497 +61,12 @@ def _json_object(text: str) -> dict[str, Any]:
     return json.loads(text[start : end + 1])
 
 
-def split_narration_sentences(text: str) -> list[str]:
-    """Split generated narration without requiring an online NLP tokenizer.
-
-    Story prompts require ordinary sentence punctuation. CJK terminators are
-    boundaries even without following whitespace; Latin terminators split when
-    followed by whitespace. Closing quotes stay attached to their sentence.
-    """
-    normalized = re.sub(r"\s+", " ", str(text)).strip()
-    if not normalized:
-        return []
-    sentences: list[str] = []
-    start = 0
-    index = 0
-    closers = {'"', "'", "\u201d", "\u2019", "\u00bb", ")", "]", "}", "\u300d", "\u300f"}
-    while index < len(normalized):
-        character = normalized[index]
-        is_cjk_end = character in "\u3002\uff01\uff1f"
-        is_spaced_end = character in ".!?" and (
-            index + 1 == len(normalized) or normalized[index + 1].isspace()
-            or normalized[index + 1] in closers
-        )
-        if is_cjk_end or is_spaced_end:
-            end = index + 1
-            while end < len(normalized) and normalized[end] in closers:
-                end += 1
-            if is_cjk_end or end == len(normalized) or normalized[end].isspace():
-                sentence = normalized[start:end].strip()
-                if sentence:
-                    sentences.append(sentence)
-                while end < len(normalized) and normalized[end].isspace():
-                    end += 1
-                start = end
-                index = end
-                continue
-        index += 1
-    tail = normalized[start:].strip()
-    if tail:
-        sentences.append(tail)
-    return sentences
-
-
-def spoken_word_count(text: str, language: str = "en") -> int:
-    """Count stable duration units without treating unspaced Japanese as one word."""
-    value = str(text)
-    if str(language).lower() == "ja":
-        japanese = re.findall(r"[\u3040-\u30ff\u3400-\u9fff]", value)
-        remainder = re.sub(r"[\u3040-\u30ff\u3400-\u9fff]", " ", value)
-        latin_words = re.findall(r"[^\W_]+(?:['’-][^\W_]+)*", remainder, flags=re.UNICODE)
-        return math.ceil(len(japanese) / 2) + len(latin_words)
-    return len(re.findall(r"[^\W_]+(?:['’-][^\W_]+)*", value, flags=re.UNICODE))
-
-
-class StoryRuntime:
-    GEMMA4_E4B_ALIAS = "gemma4-e4b-theater"
-
-    def __init__(
-        self, app_dir: Path, model_root: Path, runtime_root: Path,
-        cuda_runtime_root: Path | None = None,
-    ) -> None:
-        self.app_dir = app_dir
-        self.model_root = model_root
-        self.runtime_root = runtime_root
-        self.cuda_runtime_root = cuda_runtime_root or runtime_root
-        self.profile = "cpu"
-        self.urls = {"cpu": "http://127.0.0.1:8083", "gpu": "http://127.0.0.1:18083"}
-        self.url = self.urls[self.profile]
-        self.processes: dict[str, subprocess.Popen[bytes] | None] = {"cpu": None, "gpu": None}
-        self.start_locks = {"cpu": asyncio.Lock(), "gpu": asyncio.Lock()}
-        self.pid_files = {
-            "cpu": app_dir / "theater-story-writer.pid",
-            "gpu": app_dir / "theater-story-writer-gpu.pid",
-        }
-        # Compatibility aliases retained for integrations that inspect the CPU service.
-        self.process: subprocess.Popen[bytes] | None = None
-        self.pid_file = self.pid_files["cpu"]
-        self.model = model_root / "models" / "gemma-4-E4B-it-Q4_K_M.gguf"
-        self.model_alias = self.GEMMA4_E4B_ALIAS
-        self.model_label = "Gemma 4 E4B Q4_K_M"
-        # Measured fastest decoding on this Ryzen 9 7950X: 15.31 t/s.
-        # Eight threads leave the other physical cores for TTS and FFmpeg. Two
-        # slots let the next story plan overlap the current translation. llama.cpp
-        # divides the configured context across slots, so keep 16K per request.
-        self.threads = 8
-        self.parallel_slots = 2
-        self.context_tokens_per_slot = 16384
-        self.sampling = {"temperature": 1.0, "top_p": 0.95, "top_k": 64, "presence_penalty": 0.0}
-
-    @property
-    def gpu_available(self) -> bool:
-        runtime = self.cuda_runtime_root / "runtime"
-        return (runtime / "llama-server.exe").exists() and (runtime / "ggml-cuda.dll").exists()
-
-    def activate(self, profile: str) -> None:
-        if profile not in self.urls:
-            raise ValueError(f"Unknown story-writer profile: {profile}")
-        self.profile = profile
-        self.url = self.urls[profile]
-        self.process = self.processes[profile]
-        self.pid_file = self.pid_files[profile]
-
-    def _server_args(self, server: Path, profile: str = "cpu") -> list[str]:
-        args = [
-            str(server), "-m", str(self.model), "--alias", self.model_alias,
-            "--host", "127.0.0.1", "--port", "18083" if profile == "gpu" else "8083",
-            "-ngl", "99" if profile == "gpu" else "0",
-            "-t", str(self.threads), "-tb", str(self.threads),
-            "-c", str(self.context_tokens_per_slot * self.parallel_slots),
-            "--parallel", str(self.parallel_slots), "--batch-size", "512", "--ubatch-size", "128",
-            "--no-mmap", "--jinja", "--reasoning", "off", "--metrics",
-        ]
-        if profile == "gpu":
-            args.extend(["-fa", "on", "-ctk", "f16", "-ctv", "f16", "--kv-offload", "--op-offload"])
-        return args
-
-    async def healthy(self, profile: str | None = None) -> bool:
-        url = self.urls[profile or self.profile]
-        try:
-            async with ClientSession(timeout=ClientTimeout(total=2)) as session:
-                async with session.get(f"{url}/health") as response:
-                    if response.status != 200 or (await response.json()).get("status") != "ok":
-                        return False
-                async with session.get(f"{url}/v1/models") as response:
-                    data = await response.json(content_type=None)
-                    return response.status == 200 and any(
-                        item.get("id") == self.model_alias for item in data.get("data", [])
-                    )
-        except Exception:
-            return False
-
-    async def start(self, log_dir: Path, profile: str = "cpu") -> None:
-        if profile == "gpu" and not self.gpu_available:
-            raise TheaterError(
-                "The optional CUDA story-writer runtime is unavailable. Expected llama-server.exe and "
-                f"ggml-cuda.dll under {self.cuda_runtime_root / 'runtime'}."
-            )
-        self.activate(profile)
-        if await self.healthy(profile):
-            if profile == "gpu" and self.processes[profile] is None:
-                raise TheaterError(
-                    "A CUDA story-writer server is already using port 18083 but is not owned by this app; "
-                    "refusing to continue because its VRAM could not be released safely."
-                )
-            return
-        async with self.start_locks[profile]:
-            if await self.healthy(profile):
-                return
-            runtime_root = self.cuda_runtime_root if profile == "gpu" else self.runtime_root
-            server = runtime_root / "runtime" / "llama-server.exe"
-            if not server.exists() or not self.model.exists():
-                raise TheaterError(
-                    "Gemma 4 E4B is required. Expected "
-                    f"{self.model} and the llama.cpp server at {server}."
-                )
-            log_dir.mkdir(parents=True, exist_ok=True)
-            args = self._server_args(server, profile)
-            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            env = os.environ.copy()
-            device = "0" if profile == "gpu" else ""
-            env.update({
-                "GGML_CUDA_VISIBLE_DEVICES": device, "CUDA_VISIBLE_DEVICES": device,
-                "LLAMA_ARG_CHAT_TEMPLATE_KWARGS": '{"enable_thinking":false}',
-            })
-            suffix = "-gpu" if profile == "gpu" else ""
-            with (log_dir / f"writer{suffix}.out.log").open("ab") as out, (log_dir / f"writer{suffix}.err.log").open("ab") as err:
-                process = subprocess.Popen(
-                    args, cwd=runtime_root / "runtime", env=env, stdout=out, stderr=err,
-                    creationflags=creationflags,
-                )
-            self.processes[profile] = process
-            self.activate(profile)
-            self.pid_files[profile].write_text(str(process.pid), encoding="utf-8")
-            for _ in range(180):
-                await asyncio.sleep(0.5)
-                if await self.healthy(profile):
-                    return
-                if process.poll() is not None:
-                    raise TheaterError(f"{self.model_label} exited while loading. Check writer{suffix}.err.log.")
-            raise TheaterError(f"{self.model_label} did not become ready within 90 seconds.")
-
-    async def stop(self, profile: str | None = None) -> None:
-        selected = profile or self.profile
-        process = self.processes[selected]
-        if process and process.poll() is None:
-            await terminate_process_tree(process)
-        self.processes[selected] = None
-        self.pid_files[selected].unlink(missing_ok=True)
-        if self.profile == selected:
-            self.activate("cpu")
-
-    async def stop_all(self) -> None:
-        await self.stop("gpu")
-        await self.stop("cpu")
-
-    async def complete(self, messages: list[dict[str, str]], max_tokens: int = 900) -> tuple[str, dict[str, Any]]:
-        started = time.perf_counter()
-        body = {
-            "model": self.model_alias, "messages": messages, **self.sampling, "repeat_penalty": 1.0,
-            "max_tokens": max_tokens, "response_format": {"type": "json_object"},
-            "chat_template_kwargs": {"enable_thinking": False},
-        }
-        async with ClientSession(timeout=ClientTimeout(total=300)) as session:
-            async with session.post(f"{self.url}/v1/chat/completions", json=body) as response:
-                data = await response.json(content_type=None)
-                if response.status != 200:
-                    raise TheaterError(data.get("error", {}).get("message") or str(data))
-        content = data["choices"][0]["message"]["content"]
-        usage = data.get("usage", {})
-        elapsed = max(0.001, time.perf_counter() - started)
-        metrics = {
-            "elapsed_seconds": round(elapsed, 3),
-            "prompt_tokens": int(usage.get("prompt_tokens", 0)),
-            "completion_tokens": int(usage.get("completion_tokens", 0)),
-            "tokens_per_second": round(int(usage.get("completion_tokens", 0)) / elapsed, 2),
-        }
-        return content, metrics
-
-
-class SupertonicRuntime:
-    """Resident, CPU-only neural narration service."""
-
-    VOICES = {f"{kind}{number}" for kind in ("F", "M") for number in range(1, 6)}
-    LANGUAGES = {
-        "ar", "bg", "hr", "cs", "da", "nl", "en", "et", "fi", "fr", "de", "el",
-        "hi", "hu", "id", "it", "ja", "ko", "lv", "lt", "pl", "pt", "ro", "ru",
-        "sk", "sl", "es", "sv", "tr", "uk", "vi", "na",
-    }
-    TRANSLATION_LANGUAGES = LANGUAGES - {"na"}
-
-    def __init__(self, app_dir: Path, root: Path) -> None:
-        self.app_dir = app_dir
-        self.root = root
-        self.url = "http://127.0.0.1:8084"
-        self.process: subprocess.Popen[bytes] | None = None
-        self.start_lock = asyncio.Lock()
-        self.pid_file = app_dir / "theater-supertonic.pid"
-
-    async def healthy(self) -> bool:
-        try:
-            async with ClientSession(timeout=ClientTimeout(total=2)) as session:
-                async with session.get(f"{self.url}/v1/health") as response:
-                    data = await response.json(content_type=None)
-                    return response.status == 200 and data.get("status") == "ok"
-        except Exception:
-            return False
-
-    async def start(self, log_dir: Path) -> None:
-        if await self.healthy():
-            return
-        async with self.start_lock:
-            if await self.healthy():
-                return
-            server = self.root / ".venv" / "Scripts" / "supertonic.exe"
-            assets = self.root / "assets"
-            if not server.exists() or not (assets / "onnx" / "vocoder.onnx").exists():
-                raise TheaterError(f"Supertonic 3 is not installed in {self.root}.")
-            log_dir.mkdir(parents=True, exist_ok=True)
-            env = os.environ.copy()
-            env.update({
-                "SUPERTONIC_CACHE_DIR": str(assets),
-                "CUDA_VISIBLE_DEVICES": "",
-                "ORT_DISABLE_ALL_CUDA": "1",
-            })
-            args = [
-                str(server), "serve", "--host", "127.0.0.1", "--port", "8084",
-                "--model", "supertonic-3", "--log-level", "warning",
-            ]
-            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            with (log_dir / "supertonic.out.log").open("ab") as out, (log_dir / "supertonic.err.log").open("ab") as err:
-                self.process = subprocess.Popen(
-                    args, cwd=self.root, env=env, stdout=out, stderr=err,
-                    creationflags=creationflags,
-                )
-            self.pid_file.write_text(str(self.process.pid), encoding="utf-8")
-            for _ in range(180):
-                await asyncio.sleep(0.25)
-                if await self.healthy():
-                    return
-                if self.process.poll() is not None:
-                    raise TheaterError("Supertonic 3 exited while loading. Check its theater log.")
-            raise TheaterError("Supertonic 3 did not become ready within 45 seconds.")
-
-    async def synthesize(
-        self, text: str, output: Path, *, voice: str, language: str, speed: float = 1.05,
-    ) -> float:
-        started = time.perf_counter()
-        body = {
-            "text": text, "voice": voice, "lang": language,
-            "speed": round(max(0.90, min(1.10, float(speed))), 3),
-            "steps": 8, "silence_duration": 0.22, "response_format": "wav",
-        }
-        async with ClientSession(timeout=ClientTimeout(total=300)) as session:
-            async with session.post(f"{self.url}/v1/tts", json=body) as response:
-                data = await response.read()
-                if response.status != 200:
-                    raise TheaterError(f"Supertonic narration failed: {data.decode(errors='replace')[:500]}")
-        output.parent.mkdir(parents=True, exist_ok=True)
-        await asyncio.to_thread(output.write_bytes, data)
-        return time.perf_counter() - started
-
-    @staticmethod
-    def _concatenate_wavs(parts: list[Path], output: Path) -> None:
-        if not parts:
-            raise TheaterError("Bilingual narration contained no audio parts.")
-        output.parent.mkdir(parents=True, exist_ok=True)
-        expected: tuple[int, int, int, str] | None = None
-        with wave.open(str(output), "wb") as destination:
-            for part in parts:
-                with wave.open(str(part), "rb") as source:
-                    parameters = (
-                        source.getnchannels(), source.getsampwidth(), source.getframerate(), source.getcomptype(),
-                    )
-                    if expected is None:
-                        expected = parameters
-                        destination.setnchannels(parameters[0])
-                        destination.setsampwidth(parameters[1])
-                        destination.setframerate(parameters[2])
-                        destination.setcomptype(parameters[3], source.getcompname())
-                    elif parameters != expected:
-                        raise TheaterError("Supertonic returned incompatible WAV formats for bilingual narration.")
-                    destination.writeframes(source.readframes(source.getnframes()))
-
-    async def synthesize_alternating(
-        self, pairs: list[dict[str, str]], output: Path, *, voice: str,
-        original_language: str, translation_language: str, speed: float = 1.05,
-    ) -> float:
-        """Speak each source sentence immediately followed by its translation."""
-        if not translation_language:
-            text = " ".join(str(pair.get("original", "")).strip() for pair in pairs).strip()
-            return await self.synthesize(text, output, voice=voice, language=original_language, speed=speed)
-        started = time.perf_counter()
-        part_dir = output.parent / f".{output.stem}_parts"
-        part_dir.mkdir(parents=True, exist_ok=True)
-        parts: list[Path] = []
-        try:
-            for index, pair in enumerate(pairs, 1):
-                original = str(pair.get("original", "")).strip()
-                translated = str(pair.get("translation", "")).strip()
-                if not original or not translated:
-                    raise TheaterError(f"Bilingual sentence {index} is incomplete.")
-                for suffix, text, language in (
-                    ("original", original, original_language),
-                    ("translation", translated, translation_language),
-                ):
-                    part = part_dir / f"{index:03d}_{suffix}.wav"
-                    await self.synthesize(text, part, voice=voice, language=language, speed=speed)
-                    parts.append(part)
-            await asyncio.to_thread(self._concatenate_wavs, parts, output)
-        finally:
-            await asyncio.to_thread(shutil.rmtree, part_dir, True)
-        return time.perf_counter() - started
-
-    async def stop(self) -> None:
-        if self.process and self.process.poll() is None:
-            await terminate_process_tree(self.process)
-        self.process = None
-        self.pid_file.unlink(missing_ok=True)
-
-
-class KiwixRuntime:
-    """Local encyclopedia retrieval for source-grounded educational scenes."""
-
-    def __init__(self, app_dir: Path, root: Path) -> None:
-        self.app_dir = app_dir
-        self.root = root
-        self.url = "http://127.0.0.1:8082"
-        self.process: subprocess.Popen[bytes] | None = None
-        self.start_lock = asyncio.Lock()
-        self.pid_file = app_dir / "theater-kiwix.pid"
-
-    async def healthy(self) -> bool:
-        try:
-            async with ClientSession(timeout=ClientTimeout(total=2)) as session:
-                async with session.get(f"{self.url}/") as response:
-                    return response.status == 200
-        except Exception:
-            return False
-
-    def _archives(self) -> list[Path]:
-        archive_dir = self.root / "archives"
-        preferred: list[Path] = []
-        for pattern in ("wikipedia_en-simple_all_nopic_*.zim", "wikipedia_fi_all_nopic_*.zim"):
-            matches = sorted(archive_dir.glob(pattern), reverse=True)
-            if matches:
-                preferred.append(matches[0])
-        return preferred
-
-    async def start(self, log_dir: Path) -> None:
-        if await self.healthy():
-            return
-        async with self.start_lock:
-            if await self.healthy():
-                return
-            server = self.root / "tools" / "kiwix-tools-3.8.1" / "kiwix-serve.exe"
-            archives = self._archives()
-            if not server.exists() or not archives:
-                raise TheaterError(f"The offline encyclopedia is not installed in {self.root}.")
-            log_dir.mkdir(parents=True, exist_ok=True)
-            args = [str(server), "--port=8082", "--address=127.0.0.1", *map(str, archives)]
-            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            with (log_dir / "kiwix.out.log").open("ab") as out, (log_dir / "kiwix.err.log").open("ab") as err:
-                self.process = subprocess.Popen(
-                    args, cwd=server.parent, stdout=out, stderr=err, creationflags=creationflags,
-                )
-            self.pid_file.write_text(str(self.process.pid), encoding="utf-8")
-            for _ in range(80):
-                await asyncio.sleep(0.25)
-                if await self.healthy():
-                    return
-                if self.process.poll() is not None:
-                    raise TheaterError("The offline encyclopedia exited while loading.")
-            raise TheaterError("The offline encyclopedia did not become ready within 20 seconds.")
-
-    @staticmethod
-    def _plain(html: str) -> str:
-        value = re.sub(r"(?is)<(script|style|svg|nav).*?</\1>", " ", html)
-        value = re.sub(r"(?s)<[^>]+>", " ", value)
-        value = html_lib.unescape(value)
-        return re.sub(r"\s+", " ", value).strip()
-
-    async def research(self, query: str, language: str) -> dict[str, Any]:
-        archives = self._archives()
-        chosen = next((p for p in archives if language == "fi" and "_fi_" in p.name), None)
-        chosen = chosen or next((p for p in archives if "en-simple" in p.name), archives[0])
-        sources: list[dict[str, str]] = []
-        clauses = [part.strip() for part in re.split(r"(?i)\b(?:and|ja)\b|[,;&/]", query) if len(part.strip()) >= 4]
-        candidates = list(dict.fromkeys([*clauses, query.strip()]))[:4]
-        seen: set[str] = set()
-        async with ClientSession(timeout=ClientTimeout(total=30)) as session:
-            for candidate in candidates:
-                params = {"content": chosen.stem, "pattern": candidate[:350]}
-                async with session.get(f"{self.url}/search", params=params) as response:
-                    search_html = await response.text(errors="replace")
-                matches = re.findall(
-                    r'<a href="([^"]+)">\s*(.*?)\s*</a>\s*<cite>(.*?)</cite>',
-                    search_html, flags=re.I | re.S,
-                )
-                for href, title_html, cite_html in matches[:3]:
-                    title = self._plain(title_html)
-                    if not title or title.casefold() in seen:
-                        continue
-                    snippet = self._plain(cite_html)
-                    try:
-                        async with session.get(f"{self.url}{href}") as article_response:
-                            article = self._plain(await article_response.text(errors="replace"))
-                    except Exception:
-                        article = ""
-                    if article:
-                        at = article.lower().find(title.lower())
-                        if at >= 0:
-                            article = article[at:]
-                    excerpt = (article or snippet)[:2600]
-                    if excerpt:
-                        seen.add(title.casefold())
-                        sources.append({"title": title, "url": f"{self.url}{href}", "excerpt": excerpt})
-                    if len(sources) >= 3:
-                        break
-                if len(sources) >= 3:
-                    break
-        facts: list[dict[str, str | int]] = []
-        for source in sources:
-            cleaned = re.sub(r"\[\s*\d+\s*\]", "", source["excerpt"])
-            title_pattern = rf"^(?:{re.escape(source['title'])}\s*)+"
-            cleaned = re.sub(title_pattern, "", cleaned, flags=re.I)
-            for sentence in re.split(r"(?<=[.!?])\s+", cleaned):
-                sentence = re.sub(r"\s+", " ", sentence).strip()
-                sentence = re.sub(r"\s+([,.!?;:])", r"\1", sentence)
-                count = len(sentence.split())
-                if 8 <= count <= 46 and sentence[-1:] in ".!?":
-                    facts.append({"id": len(facts) + 1, "source": source["title"], "text": sentence})
-                if len(facts) >= 18:
-                    break
-            if len(facts) >= 18:
-                break
-        return {
-            "query": query, "archive": chosen.name, "sources": sources,
-            "facts": facts, "retrieved": time.time(),
-        }
-
-    async def stop(self) -> None:
-        if self.process and self.process.poll() is None:
-            await terminate_process_tree(self.process)
-        self.process = None
-        self.pid_file.unlink(missing_ok=True)
-
-
 class TheaterManager:
-    ACTIVE_STATUSES = {"starting", "planning", "generating", "narrating", "buffering", "running"}
+    ACTIVE_STATUSES = {"starting", "planning", "generating", "narrating", "aligning", "buffering", "running"}
     GPU_BURST_TARGET = 3
     GPU_REFILL_POLL_SECONDS = 5.0
     GPU_REFILL_MIN_PREDICTED_WAIT = 12.0
-    DEFAULT_CONTEXT_COMPACTION_SCENES = 30
+    DEFAULT_CONTEXT_COMPACTION_SCENES = DEFAULT_CONTEXT_COMPACTION_SCENES
     COVERAGE_TARGET = 1.08
     DEFAULT_TTS_SPEED = 1.05
     MIN_TTS_SPEED = 0.96
@@ -556,60 +77,24 @@ class TheaterManager:
     LIVE_DIRECTIVE_MAX_CHARS = 500
     LIVE_DIRECTIVE_ACTIVE_LIMIT = 12
     LIVE_DIRECTIVE_HISTORY_LIMIT = 100
-    LANGUAGE_NAMES = {
-        "ar": "Arabic", "bg": "Bulgarian", "hr": "Croatian", "cs": "Czech", "da": "Danish",
-        "nl": "Dutch", "en": "English", "et": "Estonian", "fi": "Finnish (suomi)", "fr": "French",
-        "de": "German", "el": "Greek", "hi": "Hindi", "hu": "Hungarian", "id": "Indonesian",
-        "it": "Italian", "ja": "Japanese", "ko": "Korean", "lv": "Latvian", "lt": "Lithuanian",
-        "pl": "Polish", "pt": "Portuguese", "ro": "Romanian", "ru": "Russian", "sk": "Slovak",
-        "sl": "Slovenian", "es": "Spanish", "sv": "Swedish", "tr": "Turkish", "uk": "Ukrainian",
-        "vi": "Vietnamese", "na": "the same language as the user's seed prompt",
-    }
-    CINEMA_DEFAULTS = {
-        "width": 480, "height": 272, "frames": 81, "fps": 16,
-        "min_words": 80, "max_words": 110, "max_slow": 8.0,
-    }
-    # Kept only so existing archived sessions remain resumable after the preset UI was removed.
-    LEGACY_QUALITY = {
-        "realtime": {"width": 192, "height": 192, "frames": 33, "fps": 12, "min_words": 90, "max_words": 260, "max_slow": 6.0},
-        "balanced": {"width": 480, "height": 272, "frames": 49, "fps": 12, "min_words": 150, "max_words": 420, "max_slow": 7.0},
-        "cinema": CINEMA_DEFAULTS,
-    }
+    LANGUAGE_NAMES = LANGUAGE_NAMES
+    CINEMA_DEFAULTS = CINEMA_DEFAULTS
 
     @classmethod
     def quality_settings(cls, config: dict[str, Any]) -> dict[str, Any]:
-        custom = config.get("quality_settings")
-        if isinstance(custom, dict):
-            return {**cls.CINEMA_DEFAULTS, **custom}
-        return dict(cls.LEGACY_QUALITY.get(str(config.get("quality", "cinema")), cls.CINEMA_DEFAULTS))
+        return quality_settings(config)
 
     @staticmethod
     def translation_language(config: dict[str, Any]) -> str:
-        language = str(config.get("translation_language") or "").lower()
-        return language if language != str(config.get("language", "en")).lower() else ""
-
-    @staticmethod
-    def uses_grounding(config: dict[str, Any]) -> bool:
-        return str(config.get("mode", "edutainment")) in {"edutainment", "lesson"}
+        return translation_language(config)
 
     @classmethod
     def narration_word_limits(cls, config: dict[str, Any]) -> tuple[int, int]:
-        """Return source-prose limits while preserving the total speech budget.
-
-        In bilingual mode each source sentence is spoken twice. A conservative
-        2.1 multiplier leaves room for translations that use slightly more words
-        than the source instead of making every scene roughly twice as long.
-        """
-        quality = cls.quality_settings(config)
-        if not cls.translation_language(config):
-            return int(quality["min_words"]), int(quality["max_words"])
-        minimum = max(12, math.ceil(float(quality["min_words"]) / 2.1))
-        maximum = max(minimum, math.floor(float(quality["max_words"]) / 2.1))
-        return minimum, maximum
+        return narration_word_limits(config)
 
     def __init__(
         self, app_dir: Path, output_root: Path, story_model_root: Path, llama_runtime_root: Path,
-        supertonic_root: Path, kiwix_root: Path, controller: Any,
+        supertonic_root: Path, whisper_root: Path, controller: Any,
         video_prompt_builder: Callable[[dict[str, Any]], dict[str, Any]],
         cuda_llama_runtime_root: Path | None = None,
     ) -> None:
@@ -623,7 +108,8 @@ class TheaterManager:
             app_dir, story_model_root, llama_runtime_root, cuda_llama_runtime_root,
         )
         self.supertonic = SupertonicRuntime(app_dir, supertonic_root)
-        self.kiwix = KiwixRuntime(app_dir, kiwix_root)
+        self.whisper = WhisperAlignmentAdapter(whisper_root)
+        self.story_source = StorySourceAdapter()
         self.sessions: dict[str, dict[str, Any]] = {}
         self.tasks: dict[str, asyncio.Task[None]] = {}
         self.steering_events: dict[str, asyncio.Event] = {}
@@ -635,6 +121,10 @@ class TheaterManager:
         for progress in self.root.glob("*/session.json"):
             try:
                 state = json.loads(progress.read_text(encoding="utf-8"))
+                if int(state.get("version", 0)) != THEATER_VERSION:
+                    continue
+                if state.get("config", {}).get("mode") not in {"story", "interactive", "my_story"}:
+                    continue
                 if state.get("status") not in {"stopped", "failed", "complete"}:
                     state["status"] = "interrupted"
                     state["message"] = "The app stopped. Saved scenes remain playable and the story can continue."
@@ -662,7 +152,7 @@ class TheaterManager:
             "format": "Wan Endless Theater", "version": THEATER_VERSION,
             "id": state["id"], "title": state.get("title"), "prompt": state["config"]["prompt"],
             "config": state["config"],
-            "bible": state.get("bible"), "grounding": state.get("grounding"),
+            "bible": state.get("bible"), "story_source": state.get("story_source"),
             "story_summary": state.get("story_summary"),
             "continuity_memory": state.get("continuity_memory", {}),
             "context_compacted_through_scene": state.get("context_compacted_through_scene", 0),
@@ -709,6 +199,7 @@ class TheaterManager:
         if self.active():
             raise TheaterError("An endless theater session is already running.")
         session_id = time.strftime("%Y%m%d-%H%M%S") + "-" + secrets.token_hex(2)
+        story_text = str(config.pop("_story_text", ""))
         state = {
             "id": session_id, "version": THEATER_VERSION, "created": time.time(),
             "status": "starting", "message": f"Loading {self.writer.model_label} into system RAM...",
@@ -734,6 +225,8 @@ class TheaterManager:
         directory = self._dir(session_id)
         for sub in ("raw", "audio", "segments", "work", "logs"):
             (directory / sub).mkdir(parents=True, exist_ok=True)
+        if story_text:
+            state["story_source"] = self.story_source.persist(directory, story_text)
         self.sessions[session_id] = state
         self.steering_events[session_id] = asyncio.Event()
         self._save(state)
@@ -753,6 +246,7 @@ class TheaterManager:
             "context_compaction_metrics": {
                 key: value for key, value in metrics.items() if "context_compaction" in key
             },
+            "story_source": dict(state.get("story_source", {})),
         }
 
     @staticmethod
@@ -771,6 +265,8 @@ class TheaterManager:
             if "context_compaction" in key:
                 metrics.pop(key, None)
         metrics.update(snapshot.get("context_compaction_metrics") or {})
+        if snapshot.get("story_source"):
+            state["story_source"] = dict(snapshot["story_source"])
 
     @staticmethod
     def _steering_context(state: dict[str, Any], number: int) -> tuple[str, list[str]]:
@@ -793,13 +289,8 @@ class TheaterManager:
             "acknowledge its specific meaning and answer it naturally in the spoken narration during this scene, "
             "without pretending the exchange is instantaneous or blindly making a viewer suggestion physically true. "
             "Treat persistent rules as active world constraints. Integrate directions causally while preserving the "
-            "fixed premise contract, established identity and continuity, safety, and grounded factual limits.\n"
+            "fixed premise contract, established identity, continuity, and audience level.\n"
         )
-        if state.get("config", {}).get("mode") == "dream":
-            prompt += (
-                "In this dream, interpret each direction as an associative intrusion: transform its imagery into the "
-                "invented world instead of explaining it, researching it, or treating it as a factual claim.\n"
-            )
         return prompt, [item["id"] for item in selected]
 
     def _log_live_directive(self, state: dict[str, Any], event: dict[str, Any]) -> None:
@@ -983,22 +474,12 @@ class TheaterManager:
                     self._save(state)
         await self.writer.stop_all()
         await self.supertonic.stop()
-        await self.kiwix.stop()
 
     def _system_prompt(self, config: dict[str, Any]) -> str:
         age = config.get("audience", "family")
-        mode = config.get("mode", "edutainment")
+        mode = config.get("mode", "story")
         language = config.get("language", "en")
         language_name = self.LANGUAGE_NAMES.get(language, language)
-        dream_contract = (
-            " This is an invented dream, not a factual account, lesson, simulation, or explanation. Treat the user's "
-            "seed as a faint associative spark rather than a binding request: do not define it, explain it, research it, "
-            "or repeatedly name it. Invent every person, place, object, history, rule and relationship. If the seed names "
-            "something real, transform it into an original fictional image without making claims about the real thing. "
-            "Use legible dream logic: sensory motifs and identities may metamorphose through meaningful association, "
-            "while each individual scene remains visually coherent. Never announce that this is a dream."
-            if mode == "dream" else ""
-        )
         interactive_contract = (
             " This is an interactive character show with one stable primary on-screen host. Keep the host's identity, "
             "appearance, voice, relationships, setting and ongoing activity consistent. Narration is primarily the "
@@ -1008,36 +489,29 @@ class TheaterManager:
             "never claim to see, hear or monitor the viewer."
             if mode == "interactive" else ""
         )
-        continuity_contract = (
-            "Maintain evolving associative continuity, recurring sensory motifs, and enough local identity for the next "
-            "scene to feel connected, but allow deliberate impossible transformations. Every scene must change the "
-            "situation and use a new action, composition and sensory motif. "
-            if mode == "dream" else
+        source_contract = (
+            " The narration comes from the user's immutable My story source. Never rewrite, continue, summarize, censor, "
+            "or translate that narration in a scene-planning response. Only infer compact visual metadata and continuity "
+            "from the exact supplied passage."
+            if mode == "my_story" else
             "Maintain strict causal continuity, stable identities, geography, wardrobe, tone and facts. Every scene must "
             "change the situation and use a new action, composition and sensory motif. Treat the user's seed as a binding "
             "premise contract. Preserve every explicit character count, named role, required object, action, event and "
             "setting. Never delay, remove, reverse or contradict an explicit premise event through an invented continuity "
             "rule. Explicit premise requirements outrank stylistic invention. "
         )
-        grounding_contract = (
-            "In educational modes, use only factual claims directly supported by the supplied offline encyclopedia "
-            "excerpts; omit any unsupported causal explanation. Educational facts must be correct, woven into action, "
-            "and never presented as medical, legal or safety-critical advice. "
-            if self.uses_grounding(config) else ""
-        )
         return (
-            "You are the resident writer for a completely offline, endless audiovisual story theater. "
+            "You are the resident writer for a completely offline audiovisual story theater. "
             f"MANDATORY OUTPUT LANGUAGE: {language_name} [{language}]. Every natural-language JSON string value, "
             "including titles, names, roles, descriptions, beats, narration, actions and summaries, must be written "
             f"only in {language_name}. Do not translate the user's story into English. Keep JSON keys in English. "
             "Return only valid JSON. "
-            f"{continuity_contract}"
-            "Never recap at length, reset the plot, reuse an earlier event, or end the story. Keep it family-safe, "
+            f"{source_contract}"
+            "Never recap at length, reset the plot, or reuse an earlier event. Keep presentation "
             f"appropriate for audience={age}, and mode={mode}. "
-            f"{grounding_contract}"
             "Narration must be natural spoken prose. "
             "Use complete sentences separated by spaces and avoid abbreviations that end in a period."
-            f"{interactive_contract}{dream_contract}"
+            f"{interactive_contract}"
         )
 
     def _translation_system_prompt(self, config: dict[str, Any]) -> str:
@@ -1064,18 +538,6 @@ class TheaterManager:
         raise TheaterError(f"The local writer's {context} did not contain exactly one scene object.")
 
     @staticmethod
-    def _grounding_text(state: dict[str, Any]) -> str:
-        sources = state.get("grounding", {}).get("sources", [])
-        if not sources:
-            return ""
-        parts = [f"SOURCE {i + 1} — {item['title']}:\n{item['excerpt']}" for i, item in enumerate(sources)]
-        return "\n\n".join(parts)[:7800]
-
-    @staticmethod
-    def _fact_options(state: dict[str, Any]) -> list[dict[str, Any]]:
-        return list(state.get("grounding", {}).get("facts", []))
-
-    @staticmethod
     def _cast_text(bible: dict[str, Any]) -> str:
         """Render both the new structured cast and legacy protagonist bibles."""
         value = bible.get("protagonists", bible.get("protagonist", "the established main cast"))
@@ -1089,78 +551,6 @@ class TheaterManager:
             elif str(item).strip():
                 members.append(str(item).strip())
         return "; ".join(members) or "the established main cast"
-
-    async def _verify_scene(self, state: dict[str, Any], scene: dict[str, Any]) -> dict[str, Any]:
-        source_text = self._grounding_text(state)
-        if not self.uses_grounding(state["config"]) or not source_text:
-            return scene
-        facts = self._fact_options(state)
-        if not facts:
-            raise TheaterError("The offline encyclopedia produced no usable factual sentences.")
-        fact_menu = "\n".join(f"F{item['id']} [{item['source']}]: {item['text']}" for item in facts)
-        words = spoken_word_count(scene.get("narration", ""), state["config"].get("language", "en"))
-        # Small local writers reliably remove unsupported prose but often make the result
-        # substantially tighter. Reject missing facts/fields, not harmless brevity.
-        minimum_words = max(12, int(words * 0.50))
-        maximum_words = max(minimum_words + 30, int(words * 1.25))
-        request = (
-            "Act as a strict factual editor. First discard every real-world explanation or causal claim from the draft. "
-            "Rewrite narration as fictional character action, dialogue, sensory detail and plot movement only. Choose one "
-            "useful fact_id from the verified menu; do not paraphrase it or add another scientific explanation. The app "
-            "will insert the exact verified sentence separately. Preserve the intended language, continuity and filmable "
-            f"action. Narration must contain {minimum_words}-{maximum_words} words before the app inserts the fact. Return "
-            "{scene:{number,title,beat,narration,visual_action,camera,fact_id}} only.\n\n"
-            f"VERIFIED FACT MENU:\n{fact_menu}\n\nSOURCE CONTEXT:\n{source_text[:4200]}\n\n"
-            f"DRAFT TO SANITIZE:\n{json.dumps(scene, ensure_ascii=False)}"
-        )
-        last_error: Exception | None = None
-        for attempt in range(1, 4):
-            if not state.get("segments"):
-                state["status"] = "planning"
-            state["message"] = f"The local writer is checking scene {scene['number']} against offline sources (attempt {attempt}/3)..."
-            state.setdefault("metrics", {})["planner_stage"] = "factual_review"
-            state["metrics"]["planner_attempt"] = attempt
-            self._save(state)
-            content, metrics = await self.writer.complete([
-                {"role": "system", "content": self._system_prompt(state["config"])},
-                {"role": "user", "content": request + f"\nValidation attempt: {attempt}. Output one complete JSON object."},
-            ], max_tokens=min(2200, words * 3 + 650))
-            with (self._dir(state["id"]) / "logs" / "fact_check_raw.jsonl").open("a", encoding="utf-8") as log:
-                log.write(json.dumps({"time": time.time(), "number": scene["number"], "attempt": attempt, "content": content}, ensure_ascii=False) + "\n")
-            try:
-                value = _json_object(content)
-                checked = self._scene_object(value.get("scene", value), "factual review")
-                checked["number"] = int(scene["number"])
-                required = ("title", "beat", "narration", "visual_action", "camera", "fact_id")
-                if any(not str(checked.get(key, "")).strip() for key in required):
-                    raise TheaterError("the factual review returned incomplete data")
-                checked_words = spoken_word_count(
-                    checked["narration"], state["config"].get("language", "en"),
-                )
-                if checked_words < minimum_words or checked_words > maximum_words:
-                    raise TheaterError(
-                        f"the sanitized narration had {checked_words} words; required {minimum_words}-{maximum_words}"
-                    )
-                fact_id = int(re.sub(r"\D", "", str(checked["fact_id"])))
-                selected = next((item for item in facts if int(item["id"]) == fact_id), None)
-                if not selected:
-                    raise TheaterError("the factual review selected an unknown fact id")
-                basis = str(selected["text"])
-                checked["narration"] = f"{checked['narration'].rstrip()} {basis}"
-                checked["fact_basis"] = basis
-                checked["learning_point"] = basis
-                checked["sources"] = [
-                    {"title": item["title"], "url": item["url"]}
-                    for item in state["grounding"]["sources"] if item["title"] == selected["source"]
-                ]
-                if scene.get("planner_metrics"):
-                    checked["planner_metrics"] = scene["planner_metrics"]
-                checked["fact_check_metrics"] = dict(metrics)
-                state["metrics"]["fact_check_tps"] = metrics["tokens_per_second"]
-                return checked
-            except Exception as exc:
-                last_error = exc
-        raise TheaterError(f"Factual review of scene {scene['number']} failed closed: {last_error}")
 
     async def _prepare_narration(self, state: dict[str, Any], scene: dict[str, Any]) -> dict[str, Any]:
         """Create the durable, sentence-aligned transcript used by UI and TTS."""
@@ -1254,7 +644,6 @@ class TheaterManager:
 
     async def _bootstrap(self, state: dict[str, Any]) -> dict[str, Any]:
         config = state["config"]
-        dream = config.get("mode") == "dream"
         language_name = self.LANGUAGE_NAMES.get(config.get("language", "en"), config.get("language", "en"))
         minimum_words, maximum_words = self.narration_word_limits(config)
         opening_maximum = min(maximum_words, minimum_words + 80)
@@ -1270,45 +659,42 @@ class TheaterManager:
             "clear that viewers can chat or influence later moments. Keep narration in the host's first-person voice.\n"
             if config.get("mode") == "interactive" else ""
         )
-        seed_opening = (
-            f"Create an endless invented dream loosely associated with this pre-sleep cue: {config['prompt']}\n"
-            if dream else f"Create an endless story from this seed: {config['prompt']}\n"
-        )
-        seed_contract = (
-            "The cue is deliberately minimal and has no non-negotiable literal requirements. Invent the dreamer or "
-            "recurring figures, world, visual style, sensory motifs and immediate situation. Do not explain, define, "
-            "quote or repeatedly name the cue. Start in the middle of an intriguing image without announcing a dream. "
-            "Use premise_contract for a few broad invented dream motifs and transformation rules, never factual claims "
-            "or a literal restatement of the cue.\n"
-            if dream else
-            "First extract the seed's non-negotiable requirements into premise_contract. Scene 1 must visibly establish "
-            "every explicitly requested main character and the immediate central situation or threat. Do not add a rule "
-            "that postpones something the seed says is already happening. Give every recurring character a stable name, "
-            "role and visual appearance.\n"
-        )
-        learning_instruction = (
-            "" if dream else
-            f"Learning focus: {config.get('learning_focus') or 'none; prioritize entertainment'}.\n"
-        )
-        grounding_block = (
-            "\n\nOFFLINE ENCYCLOPEDIA EXCERPTS — these are the only allowed basis for real-world claims:\n"
-            f"{self._grounding_text(state)}"
-            if self.uses_grounding(config) else ""
-        )
-        request = (
-            f"{seed_opening}"
-            f"Write every natural-language value only in {language_name}; English is forbidden except for JSON keys.\n"
-            f"{learning_instruction}{seed_contract}"
-            f"{interactive_opening}"
-            f"Write {minimum_words}-{opening_maximum} narration words for scene 1. This is a hard playback-duration "
-            f"budget; use exactly {opening_sentences} complete sentences with {opening_sentence_minimum}-"
-            f"{opening_sentence_maximum} words each and no recap or filler.\n"
-            "Return {title,bible:{protagonists:[{name,role,appearance}],world,visual_style,premise_contract:[...],"
-            "continuity_rules:[...]},"
-            "story_summary,scene:{number,title,beat,narration,visual_action,camera,learning_point}}. "
-            "visual_action must contain one filmable action and no visible text."
-            f"{grounding_block}"
-        )
+        source_chunk = ""
+        source_cursor = 0
+        if config.get("mode") == "my_story":
+            source = state.get("story_source")
+            if not isinstance(source, dict):
+                raise TheaterError("My story source is missing from this session.")
+            source_chunk, source_cursor = self.story_source.next_chunk(
+                self._dir(state["id"]),
+                source,
+                language=str(config.get("language", "en")),
+                minimum=minimum_words,
+                maximum=opening_maximum,
+            )
+            request = (
+                "Analyze the exact opening passage from My story. Infer a compact visual bible and one filmable scene "
+                "without rewriting or returning the narration. Preserve names, events, chronology, tone and facts. "
+                f"Write metadata only in {language_name}. Return "
+                "{title,bible:{protagonists:[{name,role,appearance}],world,visual_style,premise_contract:[...],"
+                "continuity_rules:[...]},story_summary,scene:{number,title,beat,visual_action,camera}} only.\n\n"
+                f"EXACT IMMUTABLE NARRATION:\n{source_chunk}"
+            )
+        else:
+            request = (
+                f"Create an endless story from this seed: {config['prompt']}\n"
+                f"Write every natural-language value only in {language_name}; English is forbidden except for JSON keys.\n"
+                "First extract the seed's non-negotiable requirements into premise_contract. Scene 1 must visibly "
+                "establish every explicitly requested main character and the immediate central situation or threat. "
+                "Give every recurring character a stable name, role and visual appearance.\n"
+                f"{interactive_opening}"
+                f"Write {minimum_words}-{opening_maximum} narration words for scene 1. This is a hard playback-duration "
+                f"budget; use exactly {opening_sentences} complete sentences with {opening_sentence_minimum}-"
+                f"{opening_sentence_maximum} words each and no recap or filler.\n"
+                "Return {title,bible:{protagonists:[{name,role,appearance}],world,visual_style,premise_contract:[...],"
+                "continuity_rules:[...]},story_summary,scene:{number,title,beat,narration,visual_action,camera}}. "
+                "visual_action must contain one filmable action and no visible text."
+            )
         content, metrics = await self.writer.complete([
             {"role": "system", "content": self._system_prompt(config)},
             {"role": "user", "content": request},
@@ -1320,10 +706,6 @@ class TheaterManager:
         if not isinstance(value["bible"], dict):
             raise TheaterError("The local writer did not return a story bible object.")
         bible = value["bible"]
-        # Keep archives and occasional legacy-shaped local-model replies playable.
-        if "protagonists" not in bible and "protagonist" in bible:
-            legacy = bible["protagonist"]
-            bible["protagonists"] = legacy if isinstance(legacy, list) else [legacy]
         required_bible = ("protagonists", "world", "visual_style", "premise_contract", "continuity_rules")
         if any(key not in bible for key in required_bible):
             raise TheaterError("The local writer's story bible did not preserve the full premise contract.")
@@ -1334,19 +716,12 @@ class TheaterManager:
                 "The host never claims real-time sight, hearing, monitoring, or immediate response.",
                 "Without a viewer message, the host continues the established activity and open-ended show.",
             ]
-        elif dream:
-            bible["experience"] = "dream"
-            bible["seed_role"] = "weak_association"
-            bible["premise_contract"] = [
-                "The initial cue is only a weak association, never a factual topic or literal requirement.",
-                "All people, places, objects, histories and explanations are invented inside this dream.",
-                "Recurring motifs may transform through dream logic while each individual scene stays visually coherent.",
-            ]
         value["scene"] = self._scene_object(value["scene"], "bootstrap")
-        if dream:
-            value["scene"]["learning_point"] = ""
-            value["scene"].pop("sources", None)
-            value["scene"].pop("fact_basis", None)
+        if source_chunk:
+            value["scene"]["narration"] = source_chunk
+            value["scene"]["source_cursor_end"] = source_cursor
+            state["story_source"]["cursor"] = source_cursor
+            state["story_source"]["progress"] = self.story_source.progress(state["story_source"])
         value["scene"]["planner_metrics"] = dict(metrics)
         state["metrics"]["planner_tps"] = metrics["tokens_per_second"]
         return value
@@ -1595,7 +970,7 @@ class TheaterManager:
     async def _plan_next(self, state: dict[str, Any], number: int, recent: list[dict[str, Any]]) -> dict[str, Any]:
         planning_context_before = self._planning_context_snapshot(state)
         steering_prompt, live_directive_ids = self._steering_context(state, number)
-        dream = state.get("config", {}).get("mode") == "dream"
+        my_story = state.get("config", {}).get("mode") == "my_story"
         words = self._target_words(state)
         request_minimum, request_maximum = self._narration_request_limits(state)
         sentence_count = max(3, min(10, math.ceil(words / 7)))
@@ -1609,37 +984,48 @@ class TheaterManager:
             for s in recent_context
         ]
         used_hashes = [s.get("asset_fingerprint") for s in state.get("planned", [])[-30:]]
-        progression_contract = (
-            "Follow the invented dream bible through association rather than factual explanation. Develop a recurring "
-            "sensory motif, then let one meaningful impossible transformation move the dream forward. Do not define or "
-            "teach the initial cue, introduce real-world facts, announce a dream, or force ordinary waking logic. "
-            if dream else
-            "It must obey every premise_contract item and continuity rule, follow causally, introduce a new meaningful "
-            "development, and remain open-ended. "
-        )
-        grounding_block = (
-            "OFFLINE ENCYCLOPEDIA EXCERPTS — use no real-world claims beyond these:\n"
-            f"{self._grounding_text(state)}"
-            if self.uses_grounding(state["config"]) else ""
-        )
-        request = (
+        source_chunk = ""
+        source_cursor = 0
+        shared_context = (
             f"Story bible: {json.dumps(state['bible'], ensure_ascii=False)}\n"
             f"Current story summary: {state.get('story_summary')}\n"
             f"Structured continuity memory: {json.dumps(state.get('continuity_memory', {}), ensure_ascii=False)}\n"
             f"Recent scenes: {json.dumps(prior, ensure_ascii=False)}\n"
-            f"Write every natural-language value only in {language_name}; do not switch to English. "
-            f"Create scene {number} with {request_minimum}-{request_maximum} source-language narration words. "
-            f"This is a hard playback-duration budget: use about {sentence_count} complete sentences ({sentence_minimum}-{sentence_maximum} words each), "
-            "make every sentence advance the action, and do not use recap or filler to reach the range. "
-            f"{progression_contract}"
-            "Replace story_summary with a compact current-state summary of at most "
-            "250 words; never append a scene transcript. Keep the JSON compact and do not add fields. "
-            f"{'learning_point must be an empty string. ' if dream else ''}"
-            f"Avoid these prior asset fingerprints: {used_hashes}. Return "
-            "{story_summary,scene:{number,title,beat,narration,visual_action,camera,learning_point}} only.\n\n"
-            f"{steering_prompt}"
-            f"{grounding_block}"
         )
+        if my_story:
+            source = state.get("story_source")
+            if not isinstance(source, dict):
+                raise TheaterError("My story source is missing from this session.")
+            source_chunk, source_cursor = self.story_source.next_chunk(
+                self._dir(state["id"]),
+                source,
+                language=str(language),
+                minimum=request_minimum,
+                maximum=request_maximum,
+            )
+            request = (
+                f"{shared_context}"
+                f"Analyze exact My story passage {number}. Never rewrite or return its narration. Write metadata only "
+                f"in {language_name}, preserve the source chronology, and update story_summary to a compact current-state "
+                "summary of at most 250 words. Live direction may affect staging and imagery but never the supplied words. "
+                f"Avoid these prior asset fingerprints: {used_hashes}. Return "
+                "{story_summary,scene:{number,title,beat,visual_action,camera}} only.\n\n"
+                f"{steering_prompt}EXACT IMMUTABLE NARRATION:\n{source_chunk}"
+            )
+        else:
+            request = (
+                f"{shared_context}"
+                f"Write every natural-language value only in {language_name}; do not switch to English. "
+                f"Create scene {number} with {request_minimum}-{request_maximum} source-language narration words. "
+                f"This is a hard playback-duration budget: use about {sentence_count} complete sentences "
+                f"({sentence_minimum}-{sentence_maximum} words each), make every sentence advance the action, and do not "
+                "use recap or filler. Obey every premise_contract item and continuity rule, follow causally, introduce a "
+                "new meaningful development, and remain open-ended. Replace story_summary with a compact current-state "
+                "summary of at most 250 words. Keep the JSON compact and do not add fields. "
+                f"Avoid these prior asset fingerprints: {used_hashes}. Return "
+                "{story_summary,scene:{number,title,beat,narration,visual_action,camera}} only.\n\n"
+                f"{steering_prompt}"
+            )
         repair_reason = str(state.get("metrics", {}).get("planner_repair_reason") or "").strip()
         if repair_reason:
             request += f"\nThe previous output was rejected: {repair_reason}. Correct that exact validation failure."
@@ -1657,10 +1043,9 @@ class TheaterManager:
         value = _json_object(content)
         scene = self._scene_object(value.get("scene", value), f"scene {number} plan")
         scene["number"] = number
-        if dream:
-            scene["learning_point"] = ""
-            scene.pop("sources", None)
-            scene.pop("fact_basis", None)
+        if source_chunk:
+            scene["narration"] = source_chunk
+            scene["source_cursor_end"] = source_cursor
         required = ("title", "beat", "narration", "visual_action", "camera")
         if any(not str(scene.get(key, "")).strip() for key in required):
             raise TheaterError(f"The local writer's scene {number} is missing required story fields.")
@@ -1678,7 +1063,6 @@ class TheaterManager:
                 f"the local writer returned {narration_words} narration words; "
                 f"the safe duration envelope requires {safety_minimum}-{safety_maximum}"
             )
-        scene = await self._verify_scene(state, scene)
         fingerprint_text = f"{scene['beat']}|{scene['visual_action']}|{scene['camera']}".lower()
         scene["asset_fingerprint"] = hashlib.sha256(fingerprint_text.encode("utf-8")).hexdigest()[:16]
         if scene["asset_fingerprint"] in {s.get("asset_fingerprint") for s in state.get("planned", [])}:
@@ -1695,6 +1079,9 @@ class TheaterManager:
         scene["_planning_context_before"] = planning_context_before
         scene["_live_directive_ids"] = live_directive_ids
         state["story_summary"] = str(value.get("story_summary") or state.get("story_summary"))
+        if source_chunk:
+            state["story_source"]["cursor"] = source_cursor
+            state["story_source"]["progress"] = self.story_source.progress(state["story_source"])
         state["metrics"]["planner_tps"] = metrics["tokens_per_second"]
         state["metrics"]["planner_elapsed_seconds"] = metrics["elapsed_seconds"]
         if getattr(getattr(self, "writer", None), "profile", "cpu") == "cpu":
@@ -1722,7 +1109,6 @@ class TheaterManager:
                 try:
                     scene = dict(self._scene_object(state["bootstrap_scene"], "saved bootstrap"))
                     scene["number"] = 1
-                    scene = await self._verify_scene(state, scene)
                     text = f"{scene.get('beat')}|{scene.get('visual_action')}|{scene.get('camera')}".lower()
                     scene["asset_fingerprint"] = hashlib.sha256(text.encode()).hexdigest()[:16]
                     state.pop("bootstrap_scene", None)
@@ -1756,6 +1142,12 @@ class TheaterManager:
                             state["metrics"]["gpu_planner_cycle_seconds"] = round(cycle_seconds, 3)
                         state["metrics"].pop("planner_repair_reason", None)
                         break
+                    except StorySourceFinished:
+                        state["story_source"]["complete"] = True
+                        state["story_source"]["progress"] = 1.0
+                        self._save(state)
+                        await queue.put({"_complete": True})
+                        return
                     except Exception as exc:
                         last_error = exc
                         state.setdefault("metrics", {})["planner_repair_reason"] = str(exc)[:300]
@@ -1786,6 +1178,9 @@ class TheaterManager:
             state.setdefault("metrics", {})["translation_cycle_started_at"] = time.time()
             try:
                 if scene.get("_error"):
+                    await ready_queue.put(scene)
+                    return
+                if scene.get("_complete"):
                     await ready_queue.put(scene)
                     return
                 prepared = await self._prepare_narration(state, scene)
@@ -1868,14 +1263,6 @@ class TheaterManager:
         rules = "; ".join(bible.get("continuity_rules", []))
         premise = "; ".join(bible.get("premise_contract", []))
         cast = self._cast_text(bible)
-        if state.get("config", {}).get("mode") == "dream":
-            return (
-                f"{bible['visual_style']}. {scene['camera']}. Inside the invented dream-space of {bible['world']}. "
-                f"Recurring figures and motifs: {cast}. {scene['visual_action']}. Dream associations: {premise}. "
-                f"Evolving motif rules: {rules}. Show one clear, coherent action inside this shot. Allow deliberate "
-                "surreal metamorphosis between established forms, but keep motion readable, anatomy intentional, and "
-                "the frame temporally coherent. No factual diagram, visible words, subtitles, logo, or watermark."
-            )
         host_framing = (
             "Keep the primary host clearly recognizable and present, with a natural near-camera eyeline while they "
             "continue the scene's physical activity. "
@@ -2050,6 +1437,15 @@ class TheaterManager:
                 state.update(status="narrating", message=f"Visual {number} is ready; finishing its CPU neural narration...")
                 self._save(state)
             tts_seconds = await tts_task
+            state.update(status="aligning", message=f"Whisper is aligning every spoken word in scene {number}...")
+            self._save(state)
+            async with self.controller.workflow_lock:
+                await self.controller.free_models()
+                alignment = await self.whisper.align(
+                    audio_path,
+                    spoken_text(pairs),
+                    "auto" if translation_language else str(state["config"].get("language", "en")),
+                )
         except (Exception, asyncio.CancelledError):
             if not tts_task.done():
                 tts_task.cancel()
@@ -2063,6 +1459,7 @@ class TheaterManager:
             "video_rel": video_rel, "video_seconds": video_seconds,
             "tts_seconds": tts_seconds, "cycle_started": cycle_started,
             "ready_seconds": time.perf_counter() - cycle_started,
+            "alignment": alignment,
         }
 
     async def _assemble_scene(self, state: dict[str, Any], work_item: dict[str, Any]) -> None:
@@ -2083,20 +1480,23 @@ class TheaterManager:
         completed_at = time.time()
         entry = {
             "number": number, "title": scene["title"], "beat": scene["beat"],
-            "narration": scene["narration"], "learning_point": scene.get("learning_point", ""),
+            "narration": scene["narration"],
             "translated_title": scene.get("translated_title", ""),
             "narration_sentences": scene.get("narration_sentences", []),
+            "spoken_text": spoken_text(scene.get("narration_sentences", [])),
+            "word_timestamps": work_item["alignment"]["words"],
+            "speech_segments": work_item["alignment"]["segments"],
+            "alignment_model": work_item["alignment"]["model"],
+            "alignment_seconds": work_item["alignment"]["elapsed_seconds"],
             "source_word_count": scene.get("source_word_count"),
             "translation_word_count": scene.get("translation_word_count"),
             "total_spoken_words": scene.get("total_spoken_words"),
             "narration_speed": scene.get("narration_speed", self.DEFAULT_TTS_SPEED),
             "planner_metrics": scene.get("planner_metrics", {}),
             "translation_metrics": scene.get("translation_metrics", {}),
-            "fact_check_metrics": scene.get("fact_check_metrics", {}),
             "gpu_feed_wait_seconds": round(float(scene.get("gpu_feed_wait_seconds") or 0), 3),
             "source_language": scene.get("source_language", state["config"].get("language", "en")),
             "translation_language": scene.get("translation_language", ""),
-            "sources": scene.get("sources", []),
             "visual_action": scene["visual_action"], "path": relative,
             "raw_video_path": work_item["video_rel"], "audio_path": work_item["audio_rel"], "created": completed_at,
             "asset_fingerprint": scene["asset_fingerprint"], **sync,
@@ -2212,6 +1612,8 @@ class TheaterManager:
                 scene = await self._next_planned_scene(ready_queue, translation_task)
                 if scene.get("_error"):
                     raise TheaterError(scene["_error"])
+                if scene.get("_complete"):
+                    return self._pending_prepared_count(state, excluded_numbers)
                 state.setdefault("metrics", {})["gpu_burst_prepared_scenes"] = self._pending_prepared_count(
                     state, excluded_numbers,
                 )
@@ -2388,6 +1790,7 @@ class TheaterManager:
         if (
             not self.writer.gpu_available or not ready_queue.empty()
             or metrics.get("gpu_refill_disabled") or metrics.get("gpu_burst_fallback_reason")
+            or state.get("story_source", {}).get("complete")
         ):
             return False
         predicted = self._predicted_cpu_ready_wait(state, source_queue)
@@ -2406,29 +1809,9 @@ class TheaterManager:
         assembly_task: asyncio.Task[None] | None = None
         try:
             state.setdefault("metrics", {})["run_started_at"] = time.time()
-            state.update(status="starting", message="Loading the neural voice and offline sources...")
+            state.update(status="starting", message="Loading the neural voice...")
             self._save(state)
-            startup = [
-                self.supertonic.start(self._dir(state["id"]) / "logs"),
-            ]
-            if self.uses_grounding(state["config"]):
-                startup.append(self.kiwix.start(self._dir(state["id"]) / "logs"))
-            await asyncio.gather(*startup)
-            if self.uses_grounding(state["config"]) and not state.get("grounding"):
-                state.update(status="planning", message="Searching the offline encyclopedia before writing factual scenes...")
-                self._save(state)
-                query = state["config"].get("learning_focus") or state["config"]["prompt"]
-                state["grounding"] = await self.kiwix.research(query, state["config"].get("language", "en"))
-                if not state["grounding"].get("sources"):
-                    raise TheaterError(
-                        "No offline encyclopedia source matched this learning topic. Make the learning focus more specific, "
-                        "or choose Pure story so the theater does not present unsupported facts."
-                    )
-                produced = {int(item["number"]) for item in state.get("segments", [])}
-                state["planned"] = [item for item in state.get("planned", []) if int(item["number"]) in produced]
-                state.pop("bootstrap_scene", None)
-                state["message"] = f"Grounded in {len(state['grounding']['sources'])} offline encyclopedia articles."
-                self._save(state)
+            await self.supertonic.start(self._dir(state["id"]) / "logs")
             if self.writer.gpu_available and self._pending_prepared_count(state) < self.GPU_BURST_TARGET:
                 try:
                     await self._prime_gpu_story_buffer(state)
@@ -2542,6 +1925,14 @@ class TheaterManager:
                 ready_wait_seconds = time.perf_counter() - ready_wait_started
                 if scene.get("_error"):
                     raise TheaterError(scene["_error"])
+                if scene.get("_complete"):
+                    await assembly_queue.join()
+                    state.pop("rendering_scene", None)
+                    state.pop("assembling_scene", None)
+                    state["status"] = "complete"
+                    state["message"] = "My story is complete. Every scene is archived."
+                    self._save(state)
+                    return
                 if await apply_live_steering():
                     continue
                 if int(scene["number"]) in rendered_numbers:
