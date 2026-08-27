@@ -44,6 +44,7 @@ LANGUAGE_NAMES = {
 }
 LANGUAGES = set(LANGUAGE_NAMES)
 TRANSLATION_LANGUAGES = set(LANGUAGES)
+DEFAULT_TRANSLATION_LANGUAGE = "fi"
 
 CINEMA_DEFAULTS = {
     "width": 480,
@@ -112,8 +113,11 @@ def spoken_word_count(text: str, language: str = "en") -> int:
 
 
 def translation_language(config: dict[str, Any]) -> str:
-    language = str(config.get("translation_language") or "").lower()
-    return language if language != str(config.get("language", "en")).lower() else ""
+    source = str(config.get("language", "en")).lower()
+    target = str(config.get("translation_language") or "").lower()
+    if target in TRANSLATION_LANGUAGES and target != source:
+        return target
+    return "en" if source == DEFAULT_TRANSLATION_LANGUAGE else DEFAULT_TRANSLATION_LANGUAGE
 
 
 def quality_settings(config: dict[str, Any]) -> dict[str, Any]:
@@ -123,8 +127,6 @@ def quality_settings(config: dict[str, Any]) -> dict[str, Any]:
 
 def narration_word_limits(config: dict[str, Any]) -> tuple[int, int]:
     quality = quality_settings(config)
-    if not translation_language(config):
-        return int(quality["min_words"]), int(quality["max_words"])
     minimum = max(12, math.ceil(float(quality["min_words"]) / 2.1))
     maximum = max(minimum, math.floor(float(quality["max_words"]) / 2.1))
     return minimum, maximum
@@ -213,12 +215,14 @@ def validate_story_request(raw: dict[str, Any]) -> dict[str, Any]:
     voice = str(raw.get("voice", "M1")).upper()
     language = str(raw.get("language", "en")).lower()
     target_language = str(raw.get("translation_language") or "").lower()
+    if not target_language:
+        target_language = "en" if language == DEFAULT_TRANSLATION_LANGUAGE else DEFAULT_TRANSLATION_LANGUAGE
     if voice not in VOICES:
         raise ValueError("Choose a supported Supertonic voice.")
     if language not in LANGUAGES:
         raise ValueError("Choose a supported narration language.")
-    if target_language and target_language not in TRANSLATION_LANGUAGES:
-        raise ValueError("Choose a supported translation language or turn translation off.")
+    if target_language not in TRANSLATION_LANGUAGES:
+        raise ValueError("Choose a supported translation language.")
     if target_language == language:
         raise ValueError("The translation language must differ from the story language.")
 

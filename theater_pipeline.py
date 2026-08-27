@@ -5,11 +5,9 @@ import hashlib
 import json
 import logging
 import math
-import os
 import re
 import secrets
 import shutil
-import subprocess
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -17,6 +15,7 @@ from typing import Any, Callable
 from adapters.local_models import StoryRuntime, SupertonicRuntime
 from adapters.story_source import StorySourceAdapter, StorySourceFinished
 from adapters.whisper import WhisperAlignmentAdapter
+from process_utils import hidden_process_kwargs
 from story_domain import (
     CINEMA_DEFAULTS,
     DEFAULT_CONTEXT_COMPACTION_SCENES,
@@ -72,7 +71,6 @@ class TheaterManager:
     MIN_TTS_SPEED = 0.96
     MAX_TTS_SPEED = 1.05
     FFMPEG_INTERRUPTED_EXIT_CODES = {-15, 255, 0xC000013A}
-    DEFAULT_MONOLINGUAL_SECONDS_PER_WORD = 0.32
     DEFAULT_BILINGUAL_SECONDS_PER_WORD = 0.53
     LIVE_DIRECTIVE_MAX_CHARS = 500
     LIVE_DIRECTIVE_ACTIVE_LIMIT = 12
@@ -209,7 +207,7 @@ class TheaterManager:
             "metrics": {
                 "planner_tps": 0.0, "production_ema": 0.0, "coverage_ratio": 0.0,
                 "writer_parallel_slots": self.writer.parallel_slots,
-                "parallel_translation": bool(self.translation_language(config)),
+                "parallel_translation": True,
                 "gpu_feed_wait_seconds": 0.0,
                 "completion_interval_ema": 0.0, "speech_seconds_per_word_ema": 0.0,
                 "spoken_word_multiplier_ema": 0.0, "last_narration_speed": self.DEFAULT_TTS_SPEED,
@@ -564,13 +562,6 @@ class TheaterManager:
         target_language = self.translation_language(config)
         scene["source_language"] = source_language
         scene["translation_language"] = target_language
-        if not target_language:
-            scene["narration_sentences"] = [{"original": sentence} for sentence in originals]
-            scene["source_word_count"] = spoken_word_count(scene.get("narration", ""), source_language)
-            scene["translation_word_count"] = 0
-            scene["total_spoken_words"] = scene["source_word_count"]
-            return scene
-
         numbered = [{"id": index, "text": sentence} for index, sentence in enumerate(originals, 1)]
         request = (
             "Translate the title and every numbered narration sentence. Keep the exact sentence count and ids. "
@@ -734,11 +725,7 @@ class TheaterManager:
         cadence = float(metrics.get("completion_interval_ema") or metrics.get("production_ema") or 0)
         if not cadence:
             return minimum
-        bilingual = bool(self.translation_language(state["config"]))
-        fallback = (
-            self.DEFAULT_BILINGUAL_SECONDS_PER_WORD if bilingual
-            else self.DEFAULT_MONOLINGUAL_SECONDS_PER_WORD
-        )
+        fallback = self.DEFAULT_BILINGUAL_SECONDS_PER_WORD
         seconds_per_word = max(0.08, float(metrics.get("speech_seconds_per_word_ema") or fallback))
         target = round(cadence * self.COVERAGE_TARGET / seconds_per_word)
         return int(max(minimum, min(maximum, target)))
@@ -746,7 +733,7 @@ class TheaterManager:
     def _target_words(self, state: dict[str, Any]) -> int:
         minimum, maximum = self.narration_word_limits(state["config"])
         metrics = state.setdefault("metrics", {})
-        default_multiplier = 2.1 if self.translation_language(state["config"]) else 1.0
+        default_multiplier = 2.1
         multiplier = max(1.0, min(3.5, float(metrics.get("spoken_word_multiplier_ema") or default_multiplier)))
         target = round(self._target_total_words(state) / multiplier)
         return int(max(minimum, min(maximum, target)))
@@ -1186,7 +1173,7 @@ class TheaterManager:
                 prepared = await self._prepare_narration(state, scene)
                 cycle_seconds = time.perf_counter() - cycle_started
                 cycle_metrics = {
-                    "parallel_translation": bool(self.translation_language(state["config"])),
+                    "parallel_translation": True,
                     "source_plan_queue": source_queue.qsize(),
                     "translated_scene_queue": ready_queue.qsize() + 1,
                     "translation_cycle_seconds": round(cycle_seconds, 3),
@@ -1252,8 +1239,6 @@ class TheaterManager:
             return False
         if any(not isinstance(pair, dict) for pair in pairs):
             return False
-        if not cls.translation_language(config):
-            return True
         return bool(str(scene.get("translated_title", "")).strip()) and all(
             str(pair.get("translation", "")).strip() for pair in pairs
         )
@@ -1289,11 +1274,10 @@ class TheaterManager:
         ffprobe = shutil.which("ffprobe")
         if not ffprobe:
             raise TheaterError("FFprobe is required for theater synchronization.")
-        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
         process = await asyncio.create_subprocess_exec(
             ffprobe, "-v", "error", "-show_entries", "format=duration",
             "-of", "csv=p=0", str(path), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            creationflags=creationflags,
+            **hidden_process_kwargs(),
         )
         out, _ = await process.communicate()
         if process.returncode:
@@ -1301,12 +1285,11 @@ class TheaterManager:
         return float(out.decode().strip())
 
     async def _run_ffmpeg(self, args: list[str], log_path: Path) -> None:
-        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
         for attempt in range(1, 3):
             with log_path.open("ab") as log:
                 process = await asyncio.create_subprocess_exec(
                     *args, stdout=log, stderr=log,
-                    creationflags=creationflags,
+                    **hidden_process_kwargs(),
                 )
                 try:
                     code = await process.wait()
@@ -1402,7 +1385,7 @@ class TheaterManager:
         if not isinstance(pairs, list) or not pairs:
             pairs = [{"original": sentence} for sentence in split_narration_sentences(scene["narration"])]
         translation_language = self.translation_language(state["config"])
-        if translation_language and any(not str(pair.get("translation", "")).strip() for pair in pairs):
+        if any(not str(pair.get("translation", "")).strip() for pair in pairs):
             raise TheaterError(f"Scene {number} is missing an aligned translation and cannot be narrated safely.")
         narration_speed = self._narration_speed(state, scene)
         scene["narration_speed"] = narration_speed
@@ -1444,7 +1427,7 @@ class TheaterManager:
                 alignment = await self.whisper.align(
                     audio_path,
                     spoken_text(pairs),
-                    "auto" if translation_language else str(state["config"].get("language", "en")),
+                    "auto",
                 )
         except (Exception, asyncio.CancelledError):
             if not tts_task.done():
@@ -1752,12 +1735,9 @@ class TheaterManager:
             metrics.get("planner_cycle_ema") or metrics.get("planner_elapsed_ema")
             or metrics.get("planner_elapsed_seconds") or 0
         )
-        translation_seconds = (
-            float(
-                metrics.get("translation_cycle_ema") or metrics.get("translation_elapsed_ema")
-                or metrics.get("translation_elapsed_seconds") or 0
-            )
-            if self.translation_language(state["config"]) else 0.0
+        translation_seconds = float(
+            metrics.get("translation_cycle_ema") or metrics.get("translation_elapsed_ema")
+            or metrics.get("translation_elapsed_seconds") or 0
         )
         translation_started = float(
             metrics.get("translation_cycle_started_at") or metrics.get("translation_request_started_at") or 0

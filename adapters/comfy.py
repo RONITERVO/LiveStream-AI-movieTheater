@@ -10,7 +10,7 @@ from typing import Any
 
 from aiohttp import ClientSession, ClientTimeout
 
-from process_utils import terminate_process_tree
+from process_utils import hidden_process_kwargs, terminate_process_tree
 
 
 DEFAULT_NEGATIVE = (
@@ -151,12 +151,12 @@ class ComfyAdapter:
             "--enable-dynamic-vram", "--lowvram", "--reserve-vram", "1.5", "--cache-none",
             "--preview-method", "auto", "--fast-disk",
         ]
-        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
         with (self.log_dir / "comfyui.out.log").open("ab") as stdout, (
             self.log_dir / "comfyui.err.log"
         ).open("ab") as stderr:
             self.process = subprocess.Popen(
-                args, cwd=self.root, env=env, stdout=stdout, stderr=stderr, creationflags=creationflags,
+                args, cwd=self.root, env=env, stdout=stdout, stderr=stderr,
+                **hidden_process_kwargs(),
             )
 
     async def submit(self, prompt: dict[str, Any], client_id: str) -> dict[str, Any]:
