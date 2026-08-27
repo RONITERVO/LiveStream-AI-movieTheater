@@ -664,8 +664,8 @@ class TheaterManager:
                 language=str(config.get("language", "en")),
                 minimum=minimum_words,
                 maximum=opening_maximum,
-                accepted_minimum=safety_minimum,
-                accepted_maximum=safety_maximum,
+                playback_minimum=safety_minimum,
+                playback_maximum=safety_maximum,
             )
             request = (
                 "Analyze the exact opening passage from My story. Infer a compact visual bible and one filmable scene "
@@ -994,8 +994,8 @@ class TheaterManager:
                 language=str(language),
                 minimum=request_minimum,
                 maximum=request_maximum,
-                accepted_minimum=safety_minimum,
-                accepted_maximum=safety_maximum,
+                playback_minimum=safety_minimum,
+                playback_maximum=safety_maximum,
             )
             request = (
                 f"{shared_context}"
@@ -1054,7 +1054,9 @@ class TheaterManager:
         final_source_chunk = bool(
             source_chunk and source_cursor >= int(state.get("story_source", {}).get("bytes") or 0)
         )
-        if (narration_words < safety_minimum and not final_source_chunk) or narration_words > safety_maximum:
+        source_duration_invalid = narration_words < safety_minimum and not final_source_chunk
+        writer_duration_invalid = not source_chunk and not safety_minimum <= narration_words <= safety_maximum
+        if source_duration_invalid or writer_duration_invalid:
             source_name = "My story source" if source_chunk else "The local writer"
             raise TheaterError(
                 f"{source_name} returned {narration_words} narration words; "
@@ -1072,6 +1074,8 @@ class TheaterManager:
             "requested_source_words_max": request_maximum,
             "accepted_source_words": narration_words,
             "configured_source_budget_met": configured_minimum <= narration_words <= configured_maximum,
+            "safe_duration_envelope_met": safety_minimum <= narration_words <= safety_maximum,
+            "sentence_boundary_duration_override": bool(source_chunk and narration_words > safety_maximum),
         }
         scene["_planning_context_before"] = planning_context_before
         scene["_live_directive_ids"] = live_directive_ids

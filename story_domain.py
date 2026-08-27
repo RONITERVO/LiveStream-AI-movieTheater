@@ -156,26 +156,6 @@ def normalize_story_text(text: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
 
 
-def _story_prefix_at_word_limit(text: str, language: str, limit: int) -> str:
-    """Cut an unavoidable long passage without changing any source characters."""
-    if language == "ja":
-        low, high = 1, len(text)
-        best = ""
-        while low <= high:
-            middle = (low + high) // 2
-            candidate = text[:middle].rstrip()
-            if spoken_word_count(candidate, language) <= limit:
-                best = candidate
-                low = middle + 1
-            else:
-                high = middle - 1
-        return best
-    matches = list(re.finditer(r"[^\W_]+(?:['’-][^\W_]+)*", text, flags=re.UNICODE))
-    if not matches:
-        return text.rstrip()
-    return text[:matches[min(limit, len(matches)) - 1].end()].rstrip()
-
-
 def take_story_chunk(
     text: str,
     language: str,
@@ -183,67 +163,65 @@ def take_story_chunk(
     maximum: int,
     *,
     final: bool,
-    accepted_minimum: int | None = None,
-    accepted_maximum: int | None = None,
+    playback_minimum: int | None = None,
+    playback_maximum: int | None = None,
 ) -> tuple[str, int]:
     """Select one narration-sized prefix and report consumed characters.
 
     Sentence boundaries win. ``minimum`` and ``maximum`` are the preferred live
-    duration target; the accepted bounds are the hard playback envelope. A word
-    boundary is used only when no sentence boundary can satisfy that envelope.
+    duration target; the playback bounds rank nearby sentence boundaries. Exact
+    user prose is never cut mid-sentence merely to satisfy a duration target.
     """
     leading = len(text) - len(text.lstrip())
     value = text[leading:]
     if not value:
         return "", len(text)
-    hard_minimum = minimum if accepted_minimum is None else int(accepted_minimum)
-    hard_maximum = maximum if accepted_maximum is None else int(accepted_maximum)
-    if not 1 <= hard_minimum <= minimum <= maximum <= hard_maximum:
-        raise ValueError("Story chunk limits must nest inside the accepted duration envelope.")
+    playback_floor = minimum if playback_minimum is None else int(playback_minimum)
+    playback_ceiling = maximum if playback_maximum is None else int(playback_maximum)
+    if not 1 <= playback_floor <= minimum <= maximum <= playback_ceiling:
+        raise ValueError("Story chunk targets must nest inside the playback duration envelope.")
     sentences = split_narration_sentences(value)
+    if not final and not re.search(r"[.!?。！？][\"'”’»)\]}」』]*$", value.rstrip()):
+        sentences = sentences[:-1]
+    if not sentences:
+        return "", 0
     sentence_counts = [spoken_word_count(sentence, language) for sentence in sentences]
     total_words = sum(sentence_counts)
-    if not final and total_words < hard_minimum:
+    if not final and total_words < playback_floor:
         return "", 0
 
     # A final short passage is valid: preserving the user's ending outranks padding
     # or rejecting the story. It is identified explicitly by the source cursor.
-    if final and total_words <= hard_maximum:
+    if final and total_words <= playback_ceiling:
         return value.strip(), leading + len(value.rstrip())
 
     candidates: list[tuple[int, int]] = []
     prefix_words = 0
     for index, words in enumerate(sentence_counts, start=1):
         prefix_words += words
-        if prefix_words > hard_maximum:
-            break
-        if prefix_words < hard_minimum:
+        if prefix_words < playback_floor:
             continue
         remaining_words = total_words - prefix_words
-        if final and 0 < remaining_words < hard_minimum:
+        if final and 0 < remaining_words < playback_floor:
             continue
         candidates.append((index, prefix_words))
 
     if candidates:
-        def distance(candidate: tuple[int, int]) -> tuple[int, int]:
+        def distance(candidate: tuple[int, int]) -> tuple[int, int, int]:
             words = candidate[1]
-            outside = minimum - words if words < minimum else words - maximum if words > maximum else 0
-            return outside, abs(maximum - words)
+            if playback_floor <= words <= playback_ceiling:
+                outside = minimum - words if words < minimum else words - maximum if words > maximum else 0
+                envelope_rank = 0
+            else:
+                outside = playback_floor - words if words < playback_floor else words - playback_ceiling
+                envelope_rank = 1
+            return envelope_rank, outside, abs(maximum - words)
 
         sentence_count, _ = min(candidates, key=distance)
         chunk = " ".join(sentences[:sentence_count]).strip()
         return chunk, leading + len(chunk)
 
-    cut_words = min(maximum, hard_maximum)
-    if final:
-        remaining_words = total_words - cut_words
-        if 0 < remaining_words < hard_minimum:
-            cut_words = total_words - hard_minimum
-    cut_words = max(hard_minimum, min(hard_maximum, cut_words))
-    chunk = _story_prefix_at_word_limit(value, language, cut_words)
-    if not chunk:
-        return "", 0
-    return chunk, leading + len(chunk)
+    return value.strip(), leading + len(value.rstrip())
 
 
 def validate_story_request(raw: dict[str, Any]) -> dict[str, Any]:

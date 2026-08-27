@@ -36,8 +36,8 @@ class StorySourceAdapter:
         language: str,
         minimum: int,
         maximum: int,
-        accepted_minimum: int | None = None,
-        accepted_maximum: int | None = None,
+        playback_minimum: int | None = None,
+        playback_maximum: int | None = None,
     ) -> tuple[str, int]:
         path = (session_dir / str(source.get("path", self.FILE_NAME))).resolve()
         path.relative_to(session_dir.resolve())
@@ -59,8 +59,8 @@ class StorySourceAdapter:
                 minimum,
                 maximum,
                 final=final,
-                accepted_minimum=accepted_minimum,
-                accepted_maximum=accepted_maximum,
+                playback_minimum=playback_minimum,
+                playback_maximum=playback_maximum,
             )
             if chunk:
                 consumed = len(text[:consumed_chars].encode("utf-8"))
@@ -77,7 +77,9 @@ class StorySourceAdapter:
                 raise StorySourceFinished
             read_size = min(size - cursor, read_size * 2)
             if read_size > 4 * 1024 * 1024:
-                raise ValueError("My story contains a passage too large to split safely.")
+                raise ValueError(
+                    "My story contains a sentence too large to stage as one scene without cutting the user's prose."
+                )
 
     @staticmethod
     def progress(source: dict[str, Any]) -> float:

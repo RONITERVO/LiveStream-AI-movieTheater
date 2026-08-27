@@ -174,11 +174,12 @@ class StorySourceTests(unittest.TestCase):
                 source["cursor"] = cursor
             self.assertEqual(" ".join(chunks), normalize_story_text(original))
 
-    def test_sentence_chunks_can_widen_to_the_safe_playback_envelope(self):
+    def test_story_chunks_prioritize_complete_sentence_boundaries(self):
         cases = [
             ([25, 22, 7, 40], 47),
             ([14, 11, 19, 17, 40], 44),
             ([3, 5, 18, 27, 14, 40], 53),
+            ([25, 50, 40], 75),
         ]
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -194,12 +195,26 @@ class StorySourceTests(unittest.TestCase):
                     source = adapter.persist(session, original)
                     chunk, _ = adapter.next_chunk(
                         session, source, language="en", minimum=39, maximum=42,
-                        accepted_minimum=27, accepted_maximum=68,
+                        playback_minimum=27, playback_maximum=68,
                     )
                     self.assertEqual(spoken_word_count(chunk), expected_words)
                     self.assertTrue(chunk.endswith("."))
 
-    def test_chunking_does_not_leave_an_unsafe_final_tail(self):
+    def test_reader_expands_lookahead_instead_of_cutting_at_buffer_edge(self):
+        first_sentence = " ".join(f"first{index}" for index in range(75)) + "."
+        second_sentence = " ".join(f"second{index}" for index in range(40)) + "."
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            adapter = StorySourceAdapter()
+            adapter.READ_BYTES = 64
+            source = adapter.persist(root, first_sentence + " " + second_sentence)
+            chunk, _ = adapter.next_chunk(
+                root, source, language="en", minimum=39, maximum=52,
+                playback_minimum=27, playback_maximum=68,
+            )
+            self.assertEqual(chunk, first_sentence)
+
+    def test_long_sentence_stays_whole_instead_of_being_cut(self):
         original = " ".join(f"word{index}" for index in range(75)) + "."
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -210,7 +225,7 @@ class StorySourceTests(unittest.TestCase):
                 try:
                     chunk, cursor = adapter.next_chunk(
                         root, source, language="en", minimum=39, maximum=52,
-                        accepted_minimum=27, accepted_maximum=68,
+                        playback_minimum=27, playback_maximum=68,
                     )
                 except StorySourceFinished:
                     break
@@ -218,6 +233,7 @@ class StorySourceTests(unittest.TestCase):
                 source["cursor"] = cursor
             self.assertEqual(" ".join(chunks), normalize_story_text(original))
             self.assertTrue(all(spoken_word_count(chunk) >= 27 for chunk in chunks))
+            self.assertEqual([spoken_word_count(chunk) for chunk in chunks], [75])
 
     def test_short_final_passage_is_preserved_without_padding(self):
         original = "A short ending stays exactly as the user wrote it."
@@ -227,12 +243,12 @@ class StorySourceTests(unittest.TestCase):
             source = adapter.persist(root, original)
             chunk, cursor = adapter.next_chunk(
                 root, source, language="en", minimum=39, maximum=52,
-                accepted_minimum=27, accepted_maximum=68,
+                playback_minimum=27, playback_maximum=68,
             )
             self.assertEqual(chunk, original)
             self.assertEqual(cursor, source["bytes"])
 
-    def test_planner_accepts_a_short_final_my_story_scene(self):
+    def test_planner_accepts_exact_final_my_story_outside_duration_envelope(self):
         class Writer:
             profile = "cpu"
 
@@ -251,7 +267,7 @@ class StorySourceTests(unittest.TestCase):
                     "prompt_tokens": 1, "completion_tokens": 1,
                 }
 
-        async def exercise(root):
+        async def exercise(root, exact):
             manager = TheaterManager.__new__(TheaterManager)
             manager.root = root
             manager.story_source = StorySourceAdapter()
@@ -260,7 +276,7 @@ class StorySourceTests(unittest.TestCase):
             (session / "logs").mkdir(parents=True)
             config = validate_story_request({
                 "mode": "my_story",
-                "story_text": "A short ending stays exactly as the user wrote it.",
+                "story_text": exact,
             })
             raw = config.pop("_story_text")
             state = {
@@ -273,10 +289,55 @@ class StorySourceTests(unittest.TestCase):
             scene = await manager._plan_next(state, 2, [])
             return scene, state
 
-        with tempfile.TemporaryDirectory() as directory:
-            scene, state = asyncio.run(exercise(Path(directory)))
-        self.assertEqual(scene["narration"], "A short ending stays exactly as the user wrote it.")
-        self.assertEqual(state["story_source"]["cursor"], state["story_source"]["bytes"])
+        endings = [
+            "A short ending stays exactly as the user wrote it.",
+            " ".join(f"word{index}" for index in range(75)) + ".",
+        ]
+        for exact in endings:
+            with self.subTest(words=spoken_word_count(exact)), tempfile.TemporaryDirectory() as directory:
+                scene, state = asyncio.run(exercise(Path(directory), exact))
+                self.assertEqual(scene["narration"], exact)
+                self.assertEqual(state["story_source"]["cursor"], state["story_source"]["bytes"])
+
+    def test_planner_keeps_generated_narration_inside_duration_envelope(self):
+        class Writer:
+            profile = "cpu"
+
+            async def complete(self, _messages, max_tokens=0):
+                narration = " ".join(f"word{index}" for index in range(75)) + "."
+                return json.dumps({
+                    "story_summary": "The generated story continues.",
+                    "scene": {
+                        "number": 2,
+                        "title": "Too long",
+                        "beat": "The generated scene exceeds its budget",
+                        "narration": narration,
+                        "visual_action": "The traveler crosses the square",
+                        "camera": "wide tracking shot",
+                    },
+                }), {
+                    "tokens_per_second": 1, "elapsed_seconds": 1,
+                    "prompt_tokens": 1, "completion_tokens": 1,
+                }
+
+        async def exercise(root):
+            manager = TheaterManager.__new__(TheaterManager)
+            manager.root = root
+            manager.writer = Writer()
+            session = root / "session"
+            (session / "logs").mkdir(parents=True)
+            state = {
+                "id": "session", "config": validate_story_request({"prompt": "A journey"}),
+                "bible": {"premise_contract": ["Follow the journey"]},
+                "story_summary": "The journey begins.",
+                "metrics": {}, "planned": [], "segments": [], "live_directives": [],
+            }
+            return await manager._plan_next(state, 2, [])
+
+        with tempfile.TemporaryDirectory() as directory, self.assertRaisesRegex(
+            TheaterError, "safe duration envelope requires 27-68",
+        ):
+            asyncio.run(exercise(Path(directory)))
 
     def test_default_duration_budget_exposes_one_shared_safety_envelope(self):
         config = validate_story_request({"prompt": "A story"})
