@@ -6,7 +6,8 @@ The runtime optimizes for sustained local playback and recoverability, not a sin
 
 | Work | Primary resource | Boundary |
 | --- | --- | --- |
-| Story planning and translation | CPU/RAM, optional bounded GPU burst | `StoryRuntime` adapter |
+| Canonical English story planning | CPU/RAM, optional bounded GPU burst | `StoryRuntime` adapter |
+| Bilingual localization and learning pairs | CPU/RAM, optional bounded GPU burst | `TranslationAdapter` over the shared runtime |
 | Speech synthesis | CPU/RAM | `SupertonicRuntime` adapter |
 | Video generation | GPU/VRAM | `ComfyAdapter` |
 | Word alignment | GPU/VRAM for a short post-render pass | `WhisperAlignmentAdapter` |
@@ -21,6 +22,10 @@ Whisper large-v3-turbo is faster than real time on the reference machine, but it
 Advanced quality settings define a total spoken-word budget. In bilingual mode, source planning receives a reduced budget so source plus translation remain inside the selected total. The duration controller learns completed-scene cadence, speech seconds per word, and the actual expansion ratio for the selected language pair.
 
 Supertonic pacing stays in the narrow 0.96–1.05 range. Large mismatches are handled visually: unique motion is slowed first, then forward/reverse coverage fills any remaining narration duration in one FFmpeg graph.
+
+## Attention continuity
+
+The player never invents a countdown. It records rolling exponential averages for planning, localization, Wan, speech, Whisper, assembly, and complete-scene cadence, subtracts elapsed time from the active stage, and omits the estimate until real local measurements exist. While playable media is unavailable, the transcript cycles vocabulary already produced by the localization adapter. The interlude is deliberately silent: browser speech would bypass the selected Supertonic voice, compete with scene TTS, trigger autoplay differences, and make the finished scene harder to start immediately.
 
 ## My Story scaling
 

@@ -12,6 +12,7 @@ This repository contains application code only. Model weights, generated media, 
 - **Audience levels** remain available for young, family, teen, and adult experiences.
 - **Narration** retains all 31 installed Supertonic languages and all ten voices.
 - **Language-learning translation** is always active: each source sentence is spoken and displayed before its paired translation. Compact flag controls beside Start change either language without opening settings.
+- **Continuous learning interludes** replace loading screens. The transcript shows one useful bilingual word or short phrase at a time over a slowly moving glass treatment, with measured time remaining and the current production stage in quiet supporting text.
 - **Advanced Quality** retains resolution, source frames, playback FPS, word limits, maximum slow motion, context compaction, and deterministic or random seeds.
 - **Exact word highlighting** uses Whisper timestamps aligned back to the displayed source and translation words. Clicking a word seeks the scene audio.
 - **Durable output** uses ordinary JSON, MP4, WAV, SRT, M3U8, and UTF-8 text files.
@@ -24,13 +25,15 @@ The boundaries are intentionally narrow:
 
 | Layer | Responsibility |
 | --- | --- |
-| `story_domain.py` | Pure validation, language rules, sentence pairing, budgets, and spoken-text order |
+| `story_domain.py` | Pure validation, language rules, sentence pairing, budgets, spoken-text order, and measured ETA projection |
 | `theater_pipeline.py` | Purely directed scene orchestration and durable session state |
-| `adapters/` | Gemma, Supertonic, ComfyUI/Wan, Whisper, filesystem, process, and HTTP complexity |
+| `adapters/` | Gemma, strict bilingual localization, Supertonic, ComfyUI/Wan, Whisper, filesystem, process, and HTTP complexity |
 | `app.py` | Aiohttp bootstrap and request/response boundary |
 | `static/` | A backend-configured player and form with no product-policy duplication |
 
-The session format is version 4. Earlier sessions are deliberately not migrated by this build; the pre-cleanup code and complete Git history are kept in the separately created archive tag and bundle.
+Generated story and interactive-show planning is canonical English, including the bible, continuity memory, scene metadata, narration source, and every Wan prompt. The localization adapter turns that canonical scene into the selected narration and learning languages in one strict, sentence-aligned call and extracts interlude vocabulary that is verified to occur in both localized transcripts, without adding another model job. My Story is the exception by design: pasted narration remains immutable in its selected language while Gemma emits only English visual metadata.
+
+The session format is version 5. Earlier sessions are deliberately not migrated by this build; the pre-cleanup code and complete Git history are kept in the separately created archive tag and bundle.
 
 ## Requirements
 
@@ -103,6 +106,7 @@ In bilingual playback, the domain layer defines one exact sequence: source sente
 D:\AI\ComfyUI\.venv\Scripts\python.exe -m py_compile app.py theater_pipeline.py story_domain.py adapters\*.py test_prompt.py
 D:\AI\ComfyUI\.venv\Scripts\python.exe -m unittest -v test_prompt.py
 node --check static\js\highlight.js
+node --check static\js\interlude.js
 node --check static\js\theater.js
 ```
 

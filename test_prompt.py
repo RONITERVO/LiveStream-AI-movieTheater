@@ -11,6 +11,7 @@ from unittest.mock import patch
 from adapters.comfy import build_wan_prompt
 from adapters.local_models import StoryRuntime, SupertonicRuntime
 from adapters.story_source import StorySourceAdapter, StorySourceFinished
+from adapters.translation import TranslationAdapter, starter_pair
 from adapters.whisper import WhisperAlignmentAdapter
 from app import _is_local_exit_request, api_config, create_app
 from process_utils import hidden_process_kwargs
@@ -18,8 +19,10 @@ from story_domain import (
     AUDIENCES,
     LANGUAGE_NAMES,
     VOICES,
+    attention_eta,
     narration_word_limits,
     normalize_story_text,
+    planning_language,
     spoken_text,
     spoken_word_count,
     split_narration_sentences,
@@ -70,6 +73,15 @@ class ProductSurfaceTests(unittest.TestCase):
                 "prompt": "A quiet story", "language": "en", "translation_language": "en",
             })
 
+    def test_generated_planning_is_canonical_english_but_my_story_is_immutable(self):
+        self.assertEqual(planning_language({"mode": "story", "language": "fi"}), "en")
+        self.assertEqual(planning_language({"mode": "interactive", "language": "ja"}), "en")
+        self.assertEqual(planning_language({"mode": "my_story", "language": "fi"}), "fi")
+        manager = TheaterManager.__new__(TheaterManager)
+        prompt = manager._system_prompt({"mode": "story", "language": "ja", "audience": "family"})
+        self.assertIn("MANDATORY OUTPUT LANGUAGE: English [en]", prompt)
+        self.assertNotIn("MANDATORY OUTPUT LANGUAGE: Japanese", prompt)
+
     def test_advanced_quality_values_are_preserved_and_bounded(self):
         settings = {
             "width": 832, "height": 816, "frames": 77, "fps": 60,
@@ -112,6 +124,7 @@ class ProductSurfaceTests(unittest.TestCase):
         self.assertEqual(len(data["voices"]), 10)
         self.assertEqual(len(data["languages"]), len(LANGUAGE_NAMES))
         self.assertEqual(data["default_translation_language"], "fi")
+        self.assertTrue(all(item["starter"] for item in data["languages"]))
         self.assertTrue(all(f'id="{item["flag"]}"' in flags for item in data["languages"]))
 
 
@@ -257,6 +270,97 @@ class StorySourceTests(unittest.TestCase):
 
 
 class AdapterAndOrchestrationTests(unittest.TestCase):
+    def test_translation_adapter_localizes_both_roles_and_keeps_english_exact(self):
+        class Runtime:
+            def __init__(self):
+                self.messages = None
+
+            async def complete(self, messages, max_tokens=0):
+                self.messages = messages
+                return json.dumps({
+                    "title_source": "Aamu",
+                    "title_translation": "MODEL MUST NOT REWRITE INPUT",
+                    "sentences": [
+                        {"id": 1, "source": "Aurinko nousee.", "translation": "WRONG"},
+                        {"id": 2, "source": "Lintu laulaa.", "translation": "WRONG"},
+                    ],
+                    "learning_pairs": [
+                        {"source": "aurinko", "translation": "sun"},
+                        {"source": "aurinko", "translation": "sun"},
+                        {"source": "", "translation": "empty"},
+                    ],
+                }), {"tokens_per_second": 2, "elapsed_seconds": 3, "prompt_tokens": 4}
+
+        async def exercise():
+            runtime = Runtime()
+            adapter = TranslationAdapter(runtime, LANGUAGE_NAMES)
+            result = await adapter.localize_scene(
+                title="Morning",
+                sentences=["The sun rises.", "A bird sings."],
+                input_language="en",
+                source_language="fi",
+                translation_language="en",
+            )
+            return runtime, result
+
+        runtime, result = asyncio.run(exercise())
+        self.assertEqual(result["title"], "Aamu")
+        self.assertEqual(result["translated_title"], "Morning")
+        self.assertEqual(
+            [item["translation"] for item in result["sentences"]],
+            ["The sun rises.", "A bird sings."],
+        )
+        self.assertEqual(result["learning_pairs"][1], {"source": "aurinko", "translation": "sun"})
+        self.assertIn("Input is English [en]", runtime.messages[0]["content"])
+
+    def test_my_story_localization_cannot_rewrite_the_pasted_source(self):
+        class Runtime:
+            async def complete(self, _messages, max_tokens=0):
+                return json.dumps({
+                    "title_source": "WRONG",
+                    "title_translation": "Morning",
+                    "sentences": [{
+                        "id": 1, "source": "MODEL REWRITE", "translation": "The sun rises.",
+                    }],
+                    "learning_pairs": [{"source": "aurinko", "translation": "sun"}],
+                }), {"tokens_per_second": 2, "elapsed_seconds": 3, "prompt_tokens": 4}
+
+        async def exercise():
+            return await TranslationAdapter(Runtime(), LANGUAGE_NAMES).localize_scene(
+                title="Aamu",
+                sentences=["Aurinko nousee."],
+                input_language="fi",
+                source_language="fi",
+                translation_language="en",
+            )
+
+        result = asyncio.run(exercise())
+        self.assertEqual(result["title"], "Aamu")
+        self.assertEqual(result["sentences"][0]["original"], "Aurinko nousee.")
+        self.assertEqual(result["sentences"][0]["translation"], "The sun rises.")
+
+    def test_attention_contract_uses_next_scene_pairs_and_measured_eta(self):
+        state = {
+            "status": "generating", "current_scene": 2, "rendering_scene": 2,
+            "config": {"language": "en", "translation_language": "fi"},
+            "planned": [{"number": 2, "learning_pairs": [{"source": "river", "translation": "joki"}]}],
+            "segments": [{"number": 1}],
+            "metrics": {
+                "video_seconds_ema": 100, "video_started_at": 70,
+                "tts_seconds_ema": 20, "tts_started_at": 70,
+                "alignment_seconds_ema": 5, "assembly_seconds_ema": 5,
+                "completion_interval_ema": 125,
+            },
+        }
+        self.assertEqual(attention_eta(state, 100), 80)
+        manager = TheaterManager.__new__(TheaterManager)
+        with patch("adapters.attention.time.time", return_value=100):
+            public = manager.public_state(state)
+        self.assertEqual(public["attention"]["pairs"], [{"source": "river", "translation": "joki"}])
+        self.assertEqual(public["attention"]["eta_seconds"], 80)
+        self.assertEqual(public["attention"]["average_scene_seconds"], 125)
+        self.assertEqual(starter_pair("en", "fi"), {"source": "story", "translation": "tarina"})
+
     def test_windows_child_processes_are_fully_hidden(self):
         kwargs = hidden_process_kwargs()
         if os.name == "nt":
@@ -413,6 +517,40 @@ process.stdout.write(JSON.stringify(window.TheaterHighlight.alignTimings(
         self.assertEqual(mapped[-1], 8)
         self.assertTrue(all(right >= left for left, right in zip(mapped, mapped[1:])))
 
+    def test_interlude_helpers_keep_one_small_valid_card_contract(self):
+        script = r"""
+const fs = require('fs');
+global.window = {};
+eval(fs.readFileSync('static/js/interlude.js', 'utf8'));
+const element = () => ({hidden:false, textContent:'', classList:{add(){}, remove(){}}});
+const elements = {
+  shell:element(), window:element(), transcript:element(), root:element(), pair:element(),
+  source:element(), translation:element(), meta:element()
+};
+const learner = new window.LearningInterlude(elements);
+learner.show({pairs:[{source:'river', translation:'joki'}], detail:'Creating visual 2', eta_seconds:125});
+learner.hide(true);
+process.stdout.write(JSON.stringify({
+  duration: window.TheaterInterlude.formatDuration(125),
+  dwell: window.TheaterInterlude.pairDwell({source:'river', translation:'joki'}),
+  interrupted: !learner.active && elements.root.hidden && !elements.window.hidden,
+  pairs: window.TheaterInterlude.validPairs([
+    {source:'river', translation:'joki'},
+    {source:'', translation:'empty'},
+    null,
+  ])
+}));
+"""
+        result = subprocess.run(
+            ["node", "-e", script], cwd=Path(__file__).parent,
+            check=True, capture_output=True, text=True,
+        )
+        value = json.loads(result.stdout)
+        self.assertEqual(value["duration"], "2:05")
+        self.assertGreaterEqual(value["dwell"], 2600)
+        self.assertTrue(value["interrupted"])
+        self.assertEqual(value["pairs"], [{"source": "river", "translation": "joki"}])
+
 
 class AppBoundaryTests(unittest.TestCase):
     def test_exit_requires_loopback_and_explicit_header(self):
@@ -436,6 +574,7 @@ class AppBoundaryTests(unittest.TestCase):
     def test_ui_has_no_removed_product_modes_or_learning_focus(self):
         html = (Path(__file__).parent / "static" / "index.html").read_text(encoding="utf-8")
         javascript = (Path(__file__).parent / "static" / "js" / "theater.js").read_text(encoding="utf-8")
+        interlude = (Path(__file__).parent / "static" / "js" / "interlude.js").read_text(encoding="utf-8")
         combined = (html + javascript).lower()
         for removed in ("learning focus", "educational adventure", "story-led lesson", "endless dream"):
             self.assertNotIn(removed, combined)
@@ -444,9 +583,14 @@ class AppBoundaryTests(unittest.TestCase):
         self.assertNotIn("speak story language only", combined)
         self.assertIn("quickLanguageSelect", html)
         self.assertIn("quickTranslationSelect", html)
+        self.assertIn("learningInterlude", html)
+        self.assertNotIn("spinner", html)
+        self.assertNotIn("playerWaiting", html)
+        self.assertIn("window.LearningInterlude", interlude)
         self.assertIn("response.status === 404", javascript)
         self.assertIn("localStorage.removeItem('wanTheaterSession')", javascript)
 
 
 if __name__ == "__main__":
     unittest.main()
+    planning_language,

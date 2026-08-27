@@ -21,6 +21,11 @@
   const highlighter = new window.CaptionHighlighter($('captionText'), (seconds) => {
     player.currentTime = Math.max(0, Math.min(Number(seconds) || 0, player.duration || Number(seconds) || 0));
   });
+  const interlude = new window.LearningInterlude({
+    shell: $('playerShell'), window: $('captionWindow'), transcript: $('captionText'),
+    root: $('learningInterlude'), pair: $('learningPair'), source: $('learningSource'),
+    translation: $('learningTranslation'), meta: $('learningMeta'),
+  });
 
   function toast(message) {
     const target = $('toast');
@@ -72,6 +77,24 @@
     const choice = languageChoices.find((item) => item.value === language);
     $(flagId).querySelector('use').setAttribute('href', `/static/flags.svg#${choice?.flag || `flag-${language}`}`);
     $(pickerId).title = `${prefix}: ${choice?.label || language.toUpperCase()}`;
+  }
+
+  function starterAttention(detail = 'Starting local models') {
+    const source = languageChoices.find((item) => item.value === $('languageSelect').value);
+    const target = languageChoices.find((item) => item.value === $('translationSelect').value);
+    return {
+      pairs: [{ source: source?.starter || 'story', translation: target?.starter || 'story' }],
+      detail,
+      eta_seconds: null,
+    };
+  }
+
+  function syncCaptionVisibility() {
+    if (interlude.active) {
+      $('captionWindow').hidden = false;
+      return;
+    }
+    $('captionWindow').hidden = !captions || currentIndex < 0;
   }
 
   function syncLanguageControls() {
@@ -154,9 +177,7 @@
     event.preventDefault();
     const button = $('btnStart');
     button.disabled = true;
-    $('playerWaiting').hidden = false;
-    $('waitTitle').textContent = 'Starting endless stream';
-    $('waitText').textContent = '';
+    interlude.show(starterAttention());
     try {
       const response = await fetch('/api/theater', {
         method: 'POST',
@@ -171,7 +192,7 @@
       player.load();
       renderState(next);
     } catch (error) {
-      $('playerWaiting').hidden = true;
+      interlude.hide(captions && currentIndex >= 0);
       toast(error.message);
     } finally {
       button.disabled = false;
@@ -185,6 +206,7 @@
     $('sceneNumber').textContent = `Scene ${scene.number}`;
     $('sceneTitle').textContent = scene.translated_title ? `${scene.title} · ${scene.translated_title}` : scene.title;
     highlighter.render(scene, Number(scene.duration) || player.duration || 1);
+    syncCaptionVisibility();
     renderSide();
   }
 
@@ -198,7 +220,7 @@
     }
     showScene(index);
     waitingForNext = false;
-    $('playerWaiting').hidden = true;
+    interlude.hide(captions);
     if (!autoplay) return true;
     try {
       await player.play();
@@ -214,9 +236,7 @@
       return;
     }
     waitingForNext = true;
-    $('playerWaiting').hidden = false;
-    $('waitTitle').textContent = state?.status === 'complete' ? 'My story is complete' : 'Generating Next Scene';
-    $('waitText').textContent = state?.message || '';
+    if (activeStatuses.has(state?.status)) interlude.show(state?.attention || starterAttention('Preparing next scene'));
   }
 
   function renderScenes() {
@@ -227,7 +247,7 @@
     if (!scenes.length) {
       const empty = document.createElement('div');
       empty.className = 'empty-state';
-      empty.textContent = state?.message || 'Planning stream scenes…';
+      empty.textContent = activeStatuses.has(state?.status) ? '' : state?.message || '';
       body.append(empty);
       return;
     }
@@ -426,11 +446,9 @@
     } else if (waitingForNext && next.segments?.[currentIndex + 1]) {
       playScene(currentIndex + 1);
     }
-    if (!next.segments?.length) {
-      $('playerWaiting').hidden = false;
-      $('waitTitle').textContent = next.status === 'failed' ? 'Stream Paused' : next.message || 'Starting endless stream';
-      $('waitText').textContent = next.status === 'failed' ? next.message : '';
-    }
+    const waitingWithoutMedia = !next.segments?.length || (waitingForNext && !next.segments?.[currentIndex + 1]);
+    if (running && waitingWithoutMedia) interlude.show(next.attention || starterAttention());
+    else if (!running) interlude.hide(captions && currentIndex >= 0);
     clearTimeout(pollTimer);
     if (running) pollTimer = setTimeout(() => poll(activeId), 1500);
   }
@@ -536,8 +554,8 @@
     $('btnMute').addEventListener('click', () => { muted = !muted; player.muted = muted; $('btnMute').classList.toggle('active', muted); });
     $('btnCc').addEventListener('click', () => {
       captions = !captions;
-      $('captionWindow').hidden = !captions;
       $('btnCc').classList.toggle('active', captions);
+      syncCaptionVisibility();
     });
     $('btnFullscreen').addEventListener('click', () => {
       if (document.fullscreenElement) document.exitFullscreen?.();

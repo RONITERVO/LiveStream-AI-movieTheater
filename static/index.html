@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Endless Offline Theater</title>
-  <link rel="stylesheet" href="/static/css/index.css">
+  <link rel="stylesheet" href="/static/css/index.css?v=5">
   <link rel="stylesheet" href="/static/app-exit.css">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='64' height='64' rx='16' fill='%23f4f1ea'/><polygon points='26,18 47,32 26,46' fill='%23151412'/></svg>">
 </head>
@@ -27,13 +27,15 @@
       <section class="stage-column">
         <div class="player-shell" id="playerShell">
           <video id="player" playsinline preload="auto"></video>
-          <div class="caption-window" id="captionWindow" aria-live="off">
+          <div class="caption-window" id="captionWindow" aria-live="off" hidden>
             <div class="caption-scroll" id="captionText"></div>
-          </div>
-          <div class="waiting" id="playerWaiting">
-            <span class="spinner" aria-hidden="true"></span>
-            <strong id="waitTitle">The theater is ready</strong>
-            <p id="waitText">Search or prompt a living story world.</p>
+            <div class="learning-interlude" id="learningInterlude" role="status" aria-live="polite" aria-atomic="true" hidden>
+              <div class="learning-pair" id="learningPair">
+                <strong id="learningSource"></strong>
+                <strong id="learningTranslation"></strong>
+              </div>
+              <small id="learningMeta"></small>
+            </div>
           </div>
           <div class="player-controls">
             <button class="player-button" id="btnPlayPause" type="button" title="Play/Pause" aria-label="Play/Pause">
@@ -135,7 +137,8 @@
 
   <div class="toast" id="toast" role="status"></div>
   <script src="/static/app-exit.js" defer></script>
-  <script src="/static/js/highlight.js"></script>
-  <script src="/static/js/theater.js"></script>
+  <script src="/static/js/highlight.js?v=5"></script>
+  <script src="/static/js/interlude.js?v=5"></script>
+  <script src="/static/js/theater.js?v=5"></script>
 </body>
 </html>

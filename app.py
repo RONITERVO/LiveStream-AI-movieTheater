@@ -9,6 +9,7 @@ from pathlib import Path
 from aiohttp import web
 
 from adapters.comfy import ComfyAdapter, build_wan_prompt
+from adapters.translation import STORY_WORDS
 from story_domain import (
     CINEMA_DEFAULTS,
     DEFAULT_TRANSLATION_LANGUAGE,
@@ -117,6 +118,7 @@ async def api_config(_: web.Request) -> web.Response:
                 "label": label,
                 "flag": f"flag-{value}",
                 "translation": value in TRANSLATION_LANGUAGES,
+                "starter": STORY_WORDS[value],
             }
             for value, label in LANGUAGE_NAMES.items()
         ],
@@ -141,35 +143,39 @@ async def api_video(request: web.Request) -> web.StreamResponse:
     return web.FileResponse(candidate)
 
 
+def _theater_response(state: dict) -> web.Response:
+    return web.json_response(THEATER.public_state(state))
+
+
 async def api_theater_start(request: web.Request) -> web.Response:
     try:
         raw = await request.json()
-        return web.json_response(THEATER.start(validate_story_request(raw)))
+        return _theater_response(THEATER.start(validate_story_request(raw)))
     except (TheaterError, ValueError, TypeError, json.JSONDecodeError) as exc:
         return web.json_response({"error": str(exc)}, status=400)
 
 
 async def api_theater_recent(_: web.Request) -> web.Response:
-    return web.json_response({"sessions": THEATER.recent()})
+    return web.json_response({"sessions": [THEATER.public_state(item) for item in THEATER.recent()]})
 
 
 async def api_theater_status(request: web.Request) -> web.Response:
     state = THEATER.get(request.match_info["session_id"])
     if not state:
         raise web.HTTPNotFound(text="Theater session not found")
-    return web.json_response(state)
+    return _theater_response(state)
 
 
 async def api_theater_stop(request: web.Request) -> web.Response:
     try:
-        return web.json_response(await THEATER.stop(request.match_info["session_id"]))
+        return _theater_response(await THEATER.stop(request.match_info["session_id"]))
     except TheaterError as exc:
         return web.json_response({"error": str(exc)}, status=400)
 
 
 async def api_theater_resume(request: web.Request) -> web.Response:
     try:
-        return web.json_response(THEATER.resume(request.match_info["session_id"]))
+        return _theater_response(THEATER.resume(request.match_info["session_id"]))
     except TheaterError as exc:
         return web.json_response({"error": str(exc)}, status=400)
 
@@ -179,7 +185,7 @@ async def api_theater_live_directive(request: web.Request) -> web.Response:
         raw = await request.json()
         if not isinstance(raw, dict):
             raise ValueError("Request body must be a JSON object.")
-        return web.json_response(THEATER.add_live_directive(
+        return _theater_response(THEATER.add_live_directive(
             request.match_info["session_id"],
             raw.get("text", ""),
             str(raw.get("scope", "next_scene")),
@@ -191,7 +197,7 @@ async def api_theater_live_directive(request: web.Request) -> web.Response:
 
 async def api_theater_remove_directive(request: web.Request) -> web.Response:
     try:
-        return web.json_response(THEATER.remove_live_directive(
+        return _theater_response(THEATER.remove_live_directive(
             request.match_info["session_id"],
             request.match_info["directive_id"],
         ))

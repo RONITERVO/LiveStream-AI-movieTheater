@@ -45,6 +45,7 @@ LANGUAGE_NAMES = {
 LANGUAGES = set(LANGUAGE_NAMES)
 TRANSLATION_LANGUAGES = set(LANGUAGES)
 DEFAULT_TRANSLATION_LANGUAGE = "fi"
+CANONICAL_LANGUAGE = "en"
 
 CINEMA_DEFAULTS = {
     "width": 480,
@@ -118,6 +119,51 @@ def translation_language(config: dict[str, Any]) -> str:
     if target in TRANSLATION_LANGUAGES and target != source:
         return target
     return "en" if source == DEFAULT_TRANSLATION_LANGUAGE else DEFAULT_TRANSLATION_LANGUAGE
+
+
+def planning_language(config: dict[str, Any]) -> str:
+    """Generated worlds are canonical English; pasted narration stays immutable."""
+    return str(config.get("language", "en")).lower() if config.get("mode") == "my_story" else CANONICAL_LANGUAGE
+
+
+def _remaining(expected: float, started: float, now: float) -> float:
+    if expected <= 0:
+        return 0.0
+    return max(0.0, expected - max(0.0, now - started)) if started else expected
+
+
+def attention_eta(state: dict[str, Any], now: float) -> int | None:
+    """Estimate time to playable media from rolling, local measurements only."""
+    status = str(state.get("status", ""))
+    metrics = state.get("metrics", {}) if isinstance(state.get("metrics"), dict) else {}
+    planner = float(metrics.get("planner_cycle_ema") or metrics.get("planner_elapsed_ema") or 0)
+    translation = float(metrics.get("translation_cycle_ema") or metrics.get("translation_elapsed_ema") or 0)
+    video = float(metrics.get("video_seconds_ema") or metrics.get("last_video_seconds") or 0)
+    speech = float(metrics.get("tts_seconds_ema") or metrics.get("last_tts_seconds") or 0)
+    alignment = float(metrics.get("alignment_seconds_ema") or 0)
+    assembly = float(metrics.get("assembly_seconds_ema") or metrics.get("last_assembly_seconds") or 0)
+    planner_started = float(metrics.get("planner_request_started_at") or metrics.get("planner_cycle_started_at") or 0)
+    translation_started = float(metrics.get("translation_request_started_at") or metrics.get("translation_cycle_started_at") or 0)
+    video_started = float(metrics.get("video_started_at") or 0)
+    speech_started = float(metrics.get("tts_started_at") or 0)
+    alignment_started = float(metrics.get("alignment_started_at") or 0)
+    assembly_started = float(metrics.get("assembly_started_at") or 0)
+
+    if status in {"starting", "planning"}:
+        total = _remaining(planner, planner_started, now) + _remaining(translation, translation_started, now)
+        total += max(video, speech) + alignment + assembly
+    elif status == "generating":
+        total = max(_remaining(video, video_started, now), _remaining(speech, speech_started, now))
+        total += alignment + assembly
+    elif status == "narrating":
+        total = _remaining(speech, speech_started, now) + alignment + assembly
+    elif status == "aligning":
+        total = _remaining(alignment, alignment_started, now) + assembly
+    elif status == "buffering":
+        total = _remaining(assembly, assembly_started, now)
+    else:
+        total = float(metrics.get("completion_interval_ema") or 0)
+    return max(1, round(total)) if total > 0 else None
 
 
 def quality_settings(config: dict[str, Any]) -> dict[str, Any]:
