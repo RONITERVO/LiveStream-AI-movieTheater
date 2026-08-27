@@ -36,6 +36,8 @@ class StorySourceAdapter:
         language: str,
         minimum: int,
         maximum: int,
+        accepted_minimum: int | None = None,
+        accepted_maximum: int | None = None,
     ) -> tuple[str, int]:
         path = (session_dir / str(source.get("path", self.FILE_NAME))).resolve()
         path.relative_to(session_dir.resolve())
@@ -57,6 +59,8 @@ class StorySourceAdapter:
                 minimum,
                 maximum,
                 final=final,
+                accepted_minimum=accepted_minimum,
+                accepted_maximum=accepted_maximum,
             )
             if chunk:
                 consumed = len(text[:consumed_chars].encode("utf-8"))
